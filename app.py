@@ -3739,7 +3739,7 @@ def main():
         print(f"（脚本访问 token 已启用：X-Token: {SCRIPT_TOKEN[:8]}...）")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    app.run(host="127.0.0.1", port=args.port, debug=False)
+    app.run(host="0.0.0.0", port=args.port, debug=False)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,36 @@ USE_MIRROR = os.environ.get("PIANKE_NO_MIRROR", "0") != "1"
 PYPI_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple/"
 PYPI_MIRROR_HOST = "pypi.tuna.tsinghua.edu.cn（清华大学）"
 HF_MIRROR = "https://hf-mirror.com"  # HuggingFace 镜像（DINOv2、NIMA 等模型）
+PYTORCH_CUDA_FLAVOR = os.environ.get("PIANKE_TORCH_CUDA", "cu128")
+PYTORCH_CUDA_INDEX = os.environ.get(
+    "PIANKE_TORCH_INDEX_URL",
+    f"https://download.pytorch.org/whl/{PYTORCH_CUDA_FLAVOR}",
+)
+VISION_BASE_PACKAGES = [
+    "transformers>=4.40",
+    "insightface>=0.7",
+]
+VISION_EXPERT_PACKAGES = [
+    "pyiqa>=0.1.10",
+    "timm>=0.9",
+]
+LLM_PACKAGES = [
+    "openai>=1.40",
+]
+CPU_RUNTIME_PACKAGES = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "onnxruntime>=1.16",
+]
+GPU_RUNTIME_PACKAGES = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "onnxruntime-gpu[cuda,cudnn]>=1.16",
+]
+TORCH_CUDA_PACKAGES = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+]
 
 # 所有模式都必装的核心包（HTTP 服务、图像读写、扫描）。
 # 不能塞进 MODE_PACKAGES["fast"]——否则"只选 expert"的用户会缺 Pillow/flask/...
@@ -69,18 +99,8 @@ CORE_PACKAGES = [
 # 每种模式在 CORE 之外额外需要的 pip 包。
 MODE_PACKAGES = {
     "fast": [],     # 极速模式所有依赖都在 CORE 里
-    "expert": [
-        "torch>=2.2",
-        "torchvision>=0.17",
-        "transformers>=4.40",
-        "insightface>=0.7",
-        "onnxruntime>=1.16",
-        "pyiqa>=0.1.10",
-        "timm>=0.9",
-    ],
-    "tycoon": [
-        "openai>=1.40",
-    ],
+    "expert": [],
+    "tycoon": [],
 }
 
 MODE_LABELS = {
@@ -221,6 +241,7 @@ PRESERVE = {
     ".venv",
     ".pic_selecter_install.json",
     ".pic_selecter_deps.stamp",
+    "models",
     "__pycache__",
     ".git",
     "pic_test",     # 开发用的测试图，可能用户也存了私货
@@ -336,13 +357,29 @@ MODE_TIME_ESTIMATE = {
 }
 
 
-def pip_install(packages: list[str]) -> None:
+def pip_install(
+    packages: list[str],
+    *,
+    index_url: str | None = None,
+    extra_index_urls: list[str] | None = None,
+    upgrade: bool = False,
+    force_reinstall: bool = False,
+) -> None:
     if not packages:
         return
     uv = have_uv()
+    extra_index_urls = list(extra_index_urls or [])
     if uv:
         cmd = [uv, "pip", "install", "--python", str(PY_IN_VENV)]
-        if USE_MIRROR:
+        if upgrade:
+            cmd.append("--upgrade")
+        if force_reinstall:
+            cmd.append("--force-reinstall")
+        if index_url:
+            cmd += ["--index-url", index_url]
+            for url in extra_index_urls:
+                cmd += ["--extra-index-url", url]
+        elif USE_MIRROR:
             # uv 用 --index-url 切镜像；同时把 PyPI 官方作为 fallback 防镜像缺包
             cmd += ["--index-url", PYPI_MIRROR,
                     "--extra-index-url", "https://pypi.org/simple/"]
@@ -350,11 +387,21 @@ def pip_install(packages: list[str]) -> None:
     else:
         cmd = [str(PY_IN_VENV), "-m", "pip", "install",
                "--disable-pip-version-check", "--no-input"]
-        if USE_MIRROR:
+        if upgrade:
+            cmd.append("--upgrade")
+        if force_reinstall:
+            cmd.append("--force-reinstall")
+        if index_url:
+            cmd += ["-i", index_url]
+            for url in extra_index_urls:
+                cmd += ["--extra-index-url", url]
+        elif USE_MIRROR:
             cmd += ["-i", PYPI_MIRROR,
                     "--extra-index-url", "https://pypi.org/simple/"]
         cmd += packages
-    if USE_MIRROR:
+    if index_url:
+        info(f"使用指定安装源：{index_url}")
+    elif USE_MIRROR:
         info(f"使用国内镜像源：{PYPI_MIRROR_HOST}")
         info("（海外用户想用 PyPI 官方源请在终端先 `export PIANKE_NO_MIRROR=1` 再启动）")
     info("接下来会看到 pip 滚动下载进度条——只要在动就是在装，不要关窗口。")
@@ -402,16 +449,67 @@ def _ensure_opencv_single() -> None:
 def packages_for_modes(modes: list[str]) -> list[str]:
     """返回 CORE + 选中模式的额外包。任何模式都会带上 CORE。"""
     seen: dict[str, None] = {pkg: None for pkg in CORE_PACKAGES}
-    for m in modes:
-        for pkg in MODE_PACKAGES[m]:
+    if any(m in {"expert", "tycoon"} for m in modes):
+        for pkg in VISION_BASE_PACKAGES:
+            seen[pkg] = None
+    if "expert" in modes:
+        for pkg in VISION_EXPERT_PACKAGES:
+            seen[pkg] = None
+    if "tycoon" in modes:
+        for pkg in LLM_PACKAGES:
             seen[pkg] = None
     return list(seen.keys())
+
+
+def wants_cuda_backend(modes: list[str]) -> bool:
+    if not any(m in {"expert", "tycoon"} for m in modes):
+        return False
+    if os.environ.get("PIANKE_FORCE_CPU", "0") == "1":
+        return False
+    return shutil.which("nvidia-smi") is not None
+
+
+def pip_uninstall(packages: list[str]) -> None:
+    if not packages:
+        return
+    subprocess.call([str(PY_IN_VENV), "-m", "pip", "uninstall", "-y", *packages])
+
+
+def ensure_runtime_backends(modes: list[str]) -> str:
+    if not any(m in {"expert", "tycoon"} for m in modes):
+        return "none"
+    if wants_cuda_backend(modes):
+        info(f"检测到 NVIDIA GPU，安装 CUDA 版 PyTorch（{PYTORCH_CUDA_FLAVOR}）+ ONNX Runtime GPU")
+        pip_uninstall(["onnxruntime", "onnxruntime-gpu", "onnxruntime-directml", "torch", "torchvision", "torchaudio"])
+        pip_install(
+            TORCH_CUDA_PACKAGES,
+            index_url=PYTORCH_CUDA_INDEX,
+            upgrade=True,
+            force_reinstall=True,
+        )
+        pip_install(
+            ["onnxruntime-gpu[cuda,cudnn]>=1.16"],
+            index_url="https://pypi.org/simple/",
+            upgrade=True,
+            force_reinstall=True,
+        )
+        return f"cuda:{PYTORCH_CUDA_FLAVOR}"
+    info("未检测到 NVIDIA GPU，安装 CPU 版 torch / onnxruntime")
+    pip_install(
+        CPU_RUNTIME_PACKAGES,
+        upgrade=True,
+        force_reinstall=False,
+    )
+    return "cpu"
 
 
 def ensure_dependencies(modes: list[str], install: dict, force: bool) -> None:
     """按模式列表安装依赖。已装过且模式未变则跳过。"""
     packages = packages_for_modes(modes)
-    sig = "|".join(sorted(packages))
+    backend_sig = "none"
+    if any(m in {"expert", "tycoon"} for m in modes):
+        backend_sig = f"vision:{'cuda' if wants_cuda_backend(modes) else 'cpu'}:{PYTORCH_CUDA_FLAVOR}"
+    sig = "|".join(sorted(packages + [backend_sig]))
     last_sig = install.get("packages_sig")
     if not force and last_sig == sig and PY_IN_VENV.exists():
         info("依赖已是最新，跳过安装")
@@ -419,9 +517,11 @@ def ensure_dependencies(modes: list[str], install: dict, force: bool) -> None:
 
     est = "、".join(f"{m}（{MODE_TIME_ESTIMATE[m]}）" for m in modes)
     info(f"准备安装 {len(packages)} 个 pip 包，预计耗时：{est}")
+    runtime_backend = ensure_runtime_backends(modes)
     pip_install(packages)
     install["packages_sig"] = sig
     install["modes"] = modes
+    install["runtime_backend"] = runtime_backend
     save_install(install)
     info("依赖安装完成 ✓")
 
