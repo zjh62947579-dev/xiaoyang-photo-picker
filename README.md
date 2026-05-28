@@ -4,9 +4,33 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](#一键启动推荐)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: PolyForm NC 1.0.0](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-cc785c.svg)](LICENSE)
 
 **片刻** 是一款专为摄影师和摄影爱好者设计的**本地照片双语/擂台式选片工具**。它能够将一次拍摄中相似的几十甚至上百张照片自动归入“同一个瞬间”的组中，然后通过直观的 **左右 A/B 擂台 PK** 方式，让你快速挑出最满意的一张。
+
+---
+
+## 📣 关于授权（请在使用前阅读）
+
+> **本项目对个人用户完全免费！不收一分钱！**
+>
+> **但是绝对禁止任何商业用途或盈利行为。**
+
+### ✅ 允许
+- 个人摄影师选自己的片、爱好者整理相册、学生学习研究
+- 自由修改源码、二次开发自用、和朋友 / 摄影社群分享
+
+### ❌ 禁止
+- 把片刻当作付费服务的一部分提供给客户（如代选片、婚礼后期外包等收费业务）
+- 把代码二次打包、改名、汉化后卖钱或换取商业利益
+- 在公司内部用片刻处理客户付费交付物的生产流程
+- 任何形式的商业分发与转售
+
+> 完整法律条款见 [LICENSE](LICENSE)（PolyForm Noncommercial 1.0.0）。
+>
+> **🤝 如需商业授权 / 企业合作 / 二次开发授权，请联系作者：微信 `15828377122`**
+>
+> 如果你发现有人违规商用片刻，欢迎私信举报，作者会出面处理。
 
 ---
 
