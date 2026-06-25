@@ -15,10 +15,13 @@ import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 import webbrowser
 from dataclasses import asdict, dataclass, field
@@ -181,6 +184,10 @@ def winners_dir(folder: str) -> Path:
 
 def losers_dir(folder: str) -> Path:
     return Path(folder) / "losers"
+
+
+def review_dir(folder: str) -> Path:
+    return Path(folder) / "review"
 
 
 def pic_dir(folder: str) -> Path:
@@ -1173,6 +1180,57 @@ def _do_transfer(src: str, dst: Path, mode: str) -> tuple[bool, Optional[str]]:
         return False, str(e)
 
 
+def _date_bucket_for(path: str, session: Optional[SessionState]) -> str:
+    meta = (session.meta.get(path) if session else None) or {}
+    dt = str(meta.get("datetime") or "")
+    if len(dt) >= 10 and dt[4] == "-" and dt[7] == "-":
+        return dt[:10]
+    return "unknown_date"
+
+
+def _loser_category_for(path: str, group: GroupState) -> str:
+    reason = group.auto_reject_reasons.get(path, "")
+    if not reason:
+        return "重复落选"
+    if "闭眼" in reason:
+        return "闭眼"
+    if any(s in reason for s in ("曝光", "高光", "过曝", "欠曝", "过亮", "过暗")):
+        return "过曝欠曝"
+    if any(s in reason for s in ("模糊", "失焦", "焦点", "锐度", "手抖", "不够清晰")):
+        return "模糊"
+    if any(s in reason for s in ("无法读取", "decode", "文件不存在", "文件异常")):
+        return "无法读取"
+    if any(s in reason for s in ("美学", "质量", "评分", "不达标")):
+        return "质量较低"
+    if any(s in reason for s in ("非拍摄", "截图", "缺少内容", "反差", "歪斜", "构图")):
+        return "质量较低"
+    return "质量较低"
+
+
+def _archive_dir_for(kind: str, folder: str, path: str,
+                     group: Optional[GroupState],
+                     session: Optional[SessionState]) -> Path:
+    if kind == "winner":
+        return winners_dir(folder) / _date_bucket_for(path, session)
+    if kind == "restored":
+        return review_dir(folder) / "召回保留"
+    if kind == "loser" and group is not None:
+        return losers_dir(folder) / _loser_category_for(path, group)
+    return losers_dir(folder) / "重复落选"
+
+
+def _find_archived_by_name(root: Path, name: str) -> Optional[Path]:
+    direct = root / name
+    if direct.exists():
+        return direct
+    if not root.exists():
+        return None
+    for candidate in root.rglob(name):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
                 session: Optional[SessionState] = None) -> dict:
     if group.applied or not group.finished:
@@ -1188,13 +1246,6 @@ def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
         return {"winner": None, "extra_winners": [], "losers": [], "failed": [],
                 "dry_run": dry_run, "mode": mode, "noop": True}
 
-    win_d = winners_dir(folder)
-    lose_d = losers_dir(folder)
-    if has_winner:
-        win_d.mkdir(exist_ok=True)
-    if has_losers:
-        lose_d.mkdir(exist_ok=True)
-
     moved = {"winner": None, "extra_winners": [], "losers": [], "failed": [],
              "dry_run": dry_run, "mode": mode}
 
@@ -1204,6 +1255,9 @@ def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
     if group.winner:
         old = group.winner
         comps = _get_comps(old)
+        win_d = _archive_dir_for("winner", folder, old, group, session)
+        if not dry_run:
+            win_d.mkdir(parents=True, exist_ok=True)
         target_preview = _unique_target(win_d, Path(old).name)
         moved["winner"] = {"from": old, "to": str(target_preview)}
         if not dry_run:
@@ -1228,6 +1282,9 @@ def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
     new_extras = []
     for extra in group.extra_winners:
         comps = _get_comps(extra)
+        win_d = _archive_dir_for("winner", folder, extra, group, session)
+        if not dry_run:
+            win_d.mkdir(parents=True, exist_ok=True)
         target_preview = _unique_target(win_d, Path(extra).name)
         moved["extra_winners"].append({"from": extra, "to": str(target_preview)})
         if not dry_run:
@@ -1257,6 +1314,9 @@ def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
     new_losers = []
     for loser in group.losers:
         comps = _get_comps(loser)
+        lose_d = _archive_dir_for("loser", folder, loser, group, session)
+        if not dry_run:
+            lose_d.mkdir(parents=True, exist_ok=True)
         target_preview = _unique_target(lose_d, Path(loser).name)
         moved["losers"].append({"from": loser, "to": str(target_preview)})
         if not dry_run:
@@ -2862,8 +2922,8 @@ def api_winners():
         for w in winners_in_group:
             actual = w
             if not Path(actual).exists():
-                candidate = winners_dir(SESSION.folder) / Path(actual).name
-                if candidate.exists():
+                candidate = _find_archived_by_name(winners_dir(SESSION.folder), Path(actual).name)
+                if candidate:
                     actual = str(candidate)
             out.append({
                 "path": actual,
@@ -2882,8 +2942,8 @@ def _actual_auto_rejected_path(group: GroupState, original: str, folder: str) ->
     for entry in group.move_log:
         if entry.get("src") == original and Path(entry.get("dst", "")).exists():
             return entry.get("dst", "")
-    candidate = losers_dir(folder) / Path(original).name
-    if candidate.exists():
+    candidate = _find_archived_by_name(losers_dir(folder), Path(original).name)
+    if candidate:
         return str(candidate)
     return original
 
@@ -2907,8 +2967,8 @@ def _find_prescreen_rejected(raw_path: str) -> Optional[str]:
     for original in SESSION.prescreen_rejected:
         if raw_path == original:
             return original
-        candidate = losers_dir(SESSION.folder) / Path(original).name
-        if raw_path == str(candidate):
+        candidate = _find_archived_by_name(losers_dir(SESSION.folder), Path(original).name)
+        if candidate and raw_path == str(candidate):
             return original
     return None
 
@@ -2920,8 +2980,8 @@ def api_auto_rejected():
     items = []
     if SESSION.prescreen_rejected:
         for original in SESSION.prescreen_rejected:
-            candidate = losers_dir(SESSION.folder) / Path(original).name
-            actual = str(candidate) if candidate.exists() else original
+            candidate = _find_archived_by_name(losers_dir(SESSION.folder), Path(original).name)
+            actual = str(candidate) if candidate else original
             items.append({
                 "path": actual,
                 "original_path": original,
@@ -2989,14 +3049,14 @@ def api_restore_rejected():
                     dst = entry.get("dst", "")
                     if Path(dst).exists():
                         return dst
-            candidate = losers_dir(SESSION.folder) / Path(comp_orig).name
-            if candidate.exists():
+            candidate = _find_archived_by_name(losers_dir(SESSION.folder), Path(comp_orig).name)
+            if candidate:
                 return str(candidate)
             return None
 
         if not SESSION.dry_run:
-            win_d = winners_dir(SESSION.folder)
-            win_d.mkdir(exist_ok=True)
+            win_d = _archive_dir_for("restored", SESSION.folder, original, group, SESSION)
+            win_d.mkdir(parents=True, exist_ok=True)
             source = Path(actual)
             if not source.exists():
                 failed = "文件不存在，无法捞回"
@@ -3560,8 +3620,8 @@ def _winner_paths() -> list[str]:
         for w in ([g.winner] if g.winner else []) + list(g.extra_winners):
             actual = w
             if not Path(actual).exists():
-                cand = winners_dir(SESSION.folder) / Path(actual).name
-                if cand.exists():
+                cand = _find_archived_by_name(winners_dir(SESSION.folder), Path(actual).name)
+                if cand:
                     actual = str(cand)
             if Path(actual).exists():
                 paths.append(actual)
@@ -3746,6 +3806,75 @@ def api_watermark_open_out_dir():
 
 # ---------------- 入口 ----------------
 
+def _local_url_for(host: str, port: int) -> str:
+    display_host = "localhost" if host in {"127.0.0.1", "localhost", "0.0.0.0"} else host
+    return f"http://{display_host}:{port}"
+
+
+def _bind_host_for_probe(host: str) -> str:
+    return "127.0.0.1" if host == "localhost" else host
+
+
+def _port_is_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((_bind_host_for_probe(host), port))
+        return True
+    except OSError:
+        return False
+
+
+def _probe_existing_app(port: int, timeout: float = 1.0) -> bool:
+    """Return True when the port is already serving this app."""
+    url = f"http://127.0.0.1:{port}/"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read(4096).decode("utf-8", errors="ignore")
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return False
+    return "小羊帮你筛照片" in body or "view-landing" in body
+
+
+def _port_has_this_app_process(port: int) -> bool:
+    """Best-effort fallback for an occupied port whose HTTP probe is hung."""
+    if sys.platform == "win32" or shutil.which("lsof") is None:
+        return False
+    try:
+        lsof = subprocess.run(
+            ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN", "-n", "-P"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    pids = [p.strip() for p in (lsof.stdout or "").splitlines() if p.strip().isdigit()]
+    if not pids:
+        return False
+    this_app = str(Path(__file__).resolve())
+    for pid in pids:
+        try:
+            ps = subprocess.run(
+                ["ps", "-p", pid, "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if this_app in (ps.stdout or ""):
+            return True
+    return False
+
+
+def _find_available_port(host: str, start: int, limit: int = 50) -> int:
+    for port in range(start, start + limit + 1):
+        if _port_is_available(host, port):
+            return port
+    raise RuntimeError(f"从 {start} 到 {start + limit} 都没有可用端口")
+
+
 def main():
     parser = argparse.ArgumentParser(description="本地照片擂台选片工具")
     parser.add_argument("--port", type=int, default=5057)
@@ -3757,7 +3886,19 @@ def main():
 
     _apply_runtime_selection(args.runtime)
     setup_logger(None)
-    url = f"http://localhost:{args.port}" if args.host in {"127.0.0.1", "localhost"} else f"http://{args.host}:{args.port}"
+
+    if not _port_is_available(args.host, args.port):
+        if _probe_existing_app(args.port) or _port_has_this_app_process(args.port):
+            url = _local_url_for(args.host, args.port)
+            print(f"\n检测到应用已在 {url} 运行，直接打开已有服务。")
+            if not args.no_browser:
+                webbrowser.open(url)
+            return
+        old_port = args.port
+        args.port = _find_available_port(args.host, args.port + 1)
+        print(f"\n端口 {old_port} 已被其它程序占用，改用 {args.port}。")
+
+    url = _local_url_for(args.host, args.port)
     print(f"\n启动于 {url}")
     print(f"运行时设备偏好: {args.runtime}")
     if SCRIPT_TOKEN:

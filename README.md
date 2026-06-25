@@ -135,8 +135,18 @@ python app.py --port 8080 --no-browser
 
 ```text
 📂 你的照片文件夹/
-├── 📂 winners/                # 最终胜出保留的照片 (你的成片)
-├── 📂 losers/                 # 被淘汰的照片
+├── 📂 winners/                # 最终胜出保留的照片（按拍摄日期归档）
+│   ├── 📂 2026-06-20/
+│   └── 📂 unknown_date/
+├── 📂 losers/                 # 被淘汰的照片（按原因归档）
+│   ├── 📂 模糊/
+│   ├── 📂 闭眼/
+│   ├── 📂 过曝欠曝/
+│   ├── 📂 质量较低/
+│   ├── 📂 重复落选/
+│   └── 📂 无法读取/
+├── 📂 review/                 # 用户从淘汰区召回的照片
+│   └── 📂 召回保留/
 ├── 📄 .pic_selecter_state.json # 进度持久化文件 (可随时中断并继续)
 └── 📂 _pic_selecter/          # 缓存与日志目录
     ├── 📂 thumbs/             # 缩略图缓存 (重复加载近乎瞬时)
@@ -147,8 +157,8 @@ python app.py --port 8080 --no-browser
 ### 归档模式
 
 你可以在首页的”更多选项”中选择以下归档模式：
-- **移动模式（默认，推荐）**：将原片直接移动到 `winners/` 或 `losers/` 目录。最省磁盘空间，符合一次性选片直觉。反悔时文件会无损搬回原位。
-- **复制模式**：原片保持不动，在 `winners/` 和 `losers/` 中创建副本。需要双倍磁盘空间。
+- **移动模式（默认，推荐）**：将原片直接移动到 `winners/`、`losers/` 或 `review/` 的分类目录。最省磁盘空间，符合一次性选片直觉。反悔时文件会无损搬回原位。
+- **复制模式**：原片保持不动，在分类目录中创建副本。需要双倍磁盘空间。
 
 ### 初筛强度
 
@@ -190,12 +200,13 @@ python app.py --port 8080 --no-browser
 
 <details>
 <summary><b>2. 默认的 5057 端口被占用怎么办？</b></summary>
-一键启动器读环境变量 <code>PIC_SELECTER_PORT</code>。在启动前设置后再运行启动器：
+启动器会先检查 <code>5057</code>：如果小羊已经在运行，会直接打开已有页面，不会重复启动；如果是其它程序占用了端口，会自动改用下一个可用端口。
+仍想手动指定端口时，可以在启动前设置环境变量：
 <ul>
   <li>macOS: <code>export PIC_SELECTER_PORT=8080</code></li>
   <li>Windows: <code>set PIC_SELECTER_PORT=8080</code></li>
 </ul>
-手动启动（<code>python app.py</code>）则直接传 <code>--port 8080</code>。
+手动启动（<code>python app.py</code>）也可以直接传 <code>--port 8080</code>。
 </details>
 
 <details>
@@ -220,7 +231,7 @@ python app.py --port 8080 --no-browser
 <details>
 <summary><b>6. 如何彻底卸载和清理缓存？</b></summary>
 <ul>
-  <li><b>清理照片缓存</b>：直接删除对应照片目录下的 <code>winners/</code>、<code>losers/</code>、<code>.pic_selecter_state.json</code> 及 <code>_pic_selecter/</code> 文件夹（移动模式下请先移回照片）。</li>
+  <li><b>清理照片缓存</b>：直接删除对应照片目录下的 <code>winners/</code>、<code>losers/</code>、<code>review/</code>、<code>.pic_selecter_state.json</code> 及 <code>_pic_selecter/</code> 文件夹（移动模式下请先移回照片）。</li>
   <li><b>完全卸载程序</b>：删除解压出的项目文件夹，并清理本地全局工具缓存：
     <ul>
       <li>macOS: <code>rm -rf ~/.local/bin/uv ~/.local/share/uv/</code></li>

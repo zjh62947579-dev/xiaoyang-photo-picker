@@ -1,37 +1,12 @@
 import importlib
 import sys
+import time
 import types
 from pathlib import Path
 
 
 def import_app_module():
     sys.modules.setdefault("imagehash", types.SimpleNamespace(phash=lambda *args, **kwargs: "0" * 16))
-    if "flask" not in sys.modules:
-        class FakeFlask:
-            def __init__(self, *args, **kwargs):
-                self.static_folder = kwargs.get("static_folder", "static")
-
-            def route(self, *args, **kwargs):
-                return lambda fn: fn
-
-            def after_request(self, fn):
-                return fn
-
-            def before_request(self, fn):
-                return fn
-
-            def run(self, *args, **kwargs):
-                return None
-
-        sys.modules["flask"] = types.SimpleNamespace(
-            Flask=FakeFlask,
-            Response=lambda *args, **kwargs: types.SimpleNamespace(headers={}, *args, **kwargs),
-            abort=lambda *args, **kwargs: None,
-            jsonify=lambda *args, **kwargs: args[0] if args else kwargs,
-            request=types.SimpleNamespace(path="/", host="localhost:5057", headers={}, method="GET", args={}),
-            send_file=lambda *args, **kwargs: None,
-            send_from_directory=lambda *args, **kwargs: None,
-        )
     sys.modules.pop("app", None)
     return importlib.import_module("app")
 
@@ -70,20 +45,22 @@ def build_session(tmp_path, raw_groups, enabled=True, strength="standard"):
     )
 
 
-def test_single_auto_rejected_image_goes_to_losers_not_winners(tmp_path):
+LOCAL_HEADERS = {"Origin": "http://localhost"}
+
+
+def test_single_image_group_is_kept_as_winner_until_prescreen_is_confirmed(tmp_path):
     bad = make_info(tmp_path / "bad.jpg", score=8, auto_reject=True, reason="严重模糊")
 
     sess = build_session(tmp_path, [[bad]])
 
     group = sess.groups[0]
     assert group.finished is True
-    assert group.winner is None
-    assert group.losers == [bad.path]
-    assert group.auto_rejected == [bad.path]
-    assert group.auto_reject_reasons[bad.path] == "严重模糊"
+    assert group.winner == bad.path
+    assert group.losers == []
+    assert group.auto_rejected == []
 
 
-def test_prescreen_removes_bad_photos_before_tournament(tmp_path):
+def test_group_prescreen_keeps_two_survivors_for_tournament(tmp_path):
     bad = make_info(tmp_path / "bad.jpg", score=5, auto_reject=True, reason="曝光过低")
     good1 = make_info(tmp_path / "good1.jpg", score=72)
     good2 = make_info(tmp_path / "good2.jpg", score=74)
@@ -92,13 +69,12 @@ def test_prescreen_removes_bad_photos_before_tournament(tmp_path):
 
     group = sess.groups[0]
     assert group.finished is False
-    assert group.losers == [bad.path]
-    assert group.auto_rejected == [bad.path]
-    assert group.left == good1.path
-    assert group.right == good2.path
+    assert group.losers == []
+    assert group.auto_rejected == []
+    assert {group.left, group.right} <= {bad.path, good1.path, good2.path}
 
 
-def test_standard_prescreen_auto_selects_clear_group_winner(tmp_path):
+def test_standard_prescreen_rejects_only_clear_relative_loser(tmp_path):
     best = make_info(tmp_path / "best.jpg", score=94)
     ok = make_info(tmp_path / "ok.jpg", score=62)
     weak = make_info(tmp_path / "weak.jpg", score=55)
@@ -106,10 +82,13 @@ def test_standard_prescreen_auto_selects_clear_group_winner(tmp_path):
     sess = build_session(tmp_path, [[best, ok, weak]], enabled=True, strength="standard")
 
     group = sess.groups[0]
-    assert group.finished is True
-    assert group.winner == best.path
-    assert group.losers == [ok.path, weak.path]
-    assert group.auto_selected is True
+    assert group.finished is False
+    assert group.winner is None
+    assert group.losers == [weak.path]
+    assert group.auto_rejected == [weak.path]
+    assert group.auto_reject_reasons[weak.path] == "同组美学/质量评分明显落后"
+    assert group.left == best.path
+    assert group.right == ok.path
 
 
 def test_disabled_prescreen_keeps_original_multi_group_flow(tmp_path):
@@ -129,9 +108,20 @@ def test_disabled_prescreen_keeps_original_multi_group_flow(tmp_path):
 def test_auto_rejected_api_lists_rejected_items(tmp_path):
     app = import_app_module()
     bad = make_info(tmp_path / "bad.jpg", score=8, auto_reject=True, reason="严重模糊")
-    app.SESSION = build_session(tmp_path, [[bad]])
+    app.SESSION = app.build_prescreen_session_from_infos(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        infos=[bad],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=True,
+        prescreen_strength="standard",
+    )
 
-    payload = app.api_auto_rejected()
+    with app.app.app_context():
+        payload = app.api_auto_rejected().get_json()
 
     assert payload["items"][0]["path"] == bad.path
     assert payload["items"][0]["reason"] == "严重模糊"
@@ -141,17 +131,33 @@ def test_auto_rejected_api_lists_rejected_items(tmp_path):
 def test_restore_rejected_adds_photo_to_winners_once(tmp_path):
     app = import_app_module()
     bad = make_info(tmp_path / "bad.jpg", score=8, auto_reject=True, reason="严重模糊")
-    app.SESSION = build_session(tmp_path, [[bad]])
-    app.request.get_json = lambda *args, **kwargs: {"group_id": app.SESSION.groups[0].id, "path": bad.path}
+    app.SESSION = app.build_prescreen_session_from_infos(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        infos=[bad],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=True,
+        prescreen_strength="standard",
+    )
 
-    first = app.api_restore_rejected()
-    second = app.api_restore_rejected()
+    client = app.app.test_client()
+    first = client.post(
+        "/api/restore_rejected",
+        json={"group_id": "__prescreen__", "path": bad.path},
+        headers=LOCAL_HEADERS,
+    ).get_json()
+    second = client.post(
+        "/api/restore_rejected",
+        json={"group_id": "__prescreen__", "path": bad.path},
+        headers=LOCAL_HEADERS,
+    ).get_json()
 
-    group = app.SESSION.groups[0]
     assert first["ok"] is True
     assert second["ok"] is True
-    assert group.manual_restored == [bad.path]
-    assert bad.path in group.extra_winners
+    assert app.SESSION.prescreen_restored == [bad.path]
 
 
 def test_confirm_prescreen_marks_session_reviewed(tmp_path):
@@ -159,7 +165,8 @@ def test_confirm_prescreen_marks_session_reviewed(tmp_path):
     bad = make_info(tmp_path / "bad.jpg", score=8, auto_reject=True, reason="严重模糊")
     app.SESSION = build_session(tmp_path, [[bad]])
 
-    payload = app.api_confirm_prescreen()
+    with app.app.app_context():
+        payload = app.api_confirm_prescreen().get_json()
 
     assert payload["ok"] is True
     assert app.SESSION.prescreen_reviewed is True
@@ -183,13 +190,21 @@ def test_confirm_prescreen_groups_only_passed_and_restored_photos(tmp_path):
         prescreen_enabled=True,
         prescreen_strength="standard",
     )
-    app.request.get_json = lambda *args, **kwargs: {"group_id": "__prescreen__", "path": bad_restore.path}
 
-    restored = app.api_restore_rejected()
-    confirmed = app.api_confirm_prescreen()
+    client = app.app.test_client()
+    restored = client.post(
+        "/api/restore_rejected",
+        json={"group_id": "__prescreen__", "path": bad_restore.path},
+        headers=LOCAL_HEADERS,
+    ).get_json()
+    confirmed = client.post("/api/confirm_prescreen", headers=LOCAL_HEADERS).get_json()
 
     assert restored["ok"] is True
     assert confirmed["ok"] is True
+    for _ in range(20):
+        if app._GROUPING["status"] != "running":
+            break
+        time.sleep(0.05)
     all_group_images = [p for group in app.SESSION.groups for p in group.images]
     assert good.path in all_group_images
     assert bad_restore.path in all_group_images
