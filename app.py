@@ -3749,22 +3749,22 @@ def api_watermark_open_out_dir():
 def main():
     parser = argparse.ArgumentParser(description="本地照片擂台选片工具")
     parser.add_argument("--port", type=int, default=5057)
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="监听地址。默认 127.0.0.1；局域网访问可用 0.0.0.0。")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--runtime", choices=["auto", "cpu", "gpu"], default="auto")
     args = parser.parse_args()
 
     _apply_runtime_selection(args.runtime)
     setup_logger(None)
-    url = f"http://localhost:{args.port}"
+    url = f"http://localhost:{args.port}" if args.host in {"127.0.0.1", "localhost"} else f"http://{args.host}:{args.port}"
     print(f"\n启动于 {url}")
     print(f"运行时设备偏好: {args.runtime}")
     if SCRIPT_TOKEN:
         print(f"（脚本访问 token 已启用：X-Token: {SCRIPT_TOKEN[:8]}...）")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    # 仅监听回环：前端依赖 Origin/Referer 严格匹配防 CSRF，绑 0.0.0.0
-    # 会把局域网也暴露进来，已被验证会绕过这套校验。
-    app.run(host="127.0.0.1", port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":

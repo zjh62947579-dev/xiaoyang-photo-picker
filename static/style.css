@@ -407,10 +407,62 @@ code {
   border-top: 1px dashed var(--line-soft, rgba(0, 0, 0, 0.08));
   padding-top: 10px;
   color: var(--ink-faint);
+  justify-content: flex-end;
+  position: relative;
 }
 
-.landing-foot-license span:first-child {
-  color: var(--accent, #cc785c);
+.about-trigger {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--ink-faint);
+  font: 600 13px/1 var(--font-sans);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.about-trigger:hover,
+.about-trigger[aria-expanded="true"] {
+  border-color: rgba(0, 0, 0, 0.28);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--ink);
+}
+
+.about-popover {
+  position: absolute;
+  right: 0;
+  bottom: 34px;
+  min-width: 220px;
+  padding: 12px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 252, 244, 0.96);
+  box-shadow: 0 14px 34px rgba(42, 31, 18, 0.14);
+  color: var(--ink-muted);
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+  display: grid;
+  gap: 5px;
+  z-index: 30;
+}
+
+.about-popover.hidden {
+  display: none;
+}
+
+.about-popover strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.about-popover span {
+  font-size: 12px;
 }
 
 /* =========================================================

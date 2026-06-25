@@ -43,6 +43,10 @@ state.json
 *.session.json
 log.txt
 job-*.log
+.pic_selecter_install.json
+*.pid
+com.codex.pianke.local.plist
+pianke-server*.log
 
 # ===== IDE / OS =====
 .DS_Store

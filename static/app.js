@@ -1,4 +1,4 @@
-/* 片刻 — 前端逻辑 v3.2 (照片墙) */
+/* 小羊帮你筛照片 — 前端逻辑 v3.2 (照片墙)，基于片刻 */
 
 const $ = (id) => document.getElementById(id);
 const VIEWS = ["landing", "processing", "prescreen", "preview", "arena", "done"];
@@ -59,15 +59,15 @@ function showView(name, push = true) {
 }
 function updateTitle(view) {
   const map = {
-    landing: "片刻",
-    processing: "分析中… · 片刻",
-    prescreen: "初筛复核 · 片刻",
-    preview: "分组预览 · 片刻",
-    arena: currentGroup ? `组 #${currentGroup.id_short} · 片刻`
-                        : "选片中 · 片刻",
-    done: "完成 · 片刻",
+    landing: "小羊帮你筛照片",
+    processing: "分析中… · 小羊帮你筛照片",
+    prescreen: "初筛复核 · 小羊帮你筛照片",
+    preview: "分组预览 · 小羊帮你筛照片",
+    arena: currentGroup ? `组 #${currentGroup.id_short} · 小羊帮你筛照片`
+                        : "选片中 · 小羊帮你筛照片",
+    done: "完成 · 小羊帮你筛照片",
   };
-  document.title = map[view] || "片刻";
+  document.title = map[view] || "小羊帮你筛照片";
 }
 window.addEventListener("popstate", (e) => {
   const v = e.state?.view;
@@ -2882,5 +2882,25 @@ $("wm-next").addEventListener("click", () => {
 $("wm-modal").addEventListener("click", (e) => {
   if (e.target.id === "wm-modal") wmClose();
 });
+
+const aboutTrigger = $("about-trigger");
+const aboutPopover = $("about-popover");
+if (aboutTrigger && aboutPopover) {
+  function closeAboutPopover() {
+    aboutPopover.classList.add("hidden");
+    aboutTrigger.setAttribute("aria-expanded", "false");
+  }
+  aboutTrigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const willOpen = aboutPopover.classList.contains("hidden");
+    aboutPopover.classList.toggle("hidden", !willOpen);
+    aboutTrigger.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  });
+  aboutPopover.addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", closeAboutPopover);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeAboutPopover();
+  });
+}
 
 bootstrap();
