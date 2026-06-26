@@ -24,7 +24,8 @@ import urllib.error
 import urllib.request
 import uuid
 import webbrowser
-from dataclasses import asdict, dataclass, field
+import zipfile
+from dataclasses import asdict, dataclass, field, replace
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable, Optional
@@ -51,7 +52,7 @@ except Exception:
 
 
 STATE_FILENAME = ".pic_selecter_state.json"
-STATE_SCHEMA = 6
+STATE_SCHEMA = 7
 PIC_DIR = "_pic_selecter"
 THUMB_MAX = 1600
 
@@ -124,6 +125,9 @@ class SessionState:
     prescreen_enabled: bool = True
     prescreen_strength: str = "standard"
     prescreen_reviewed: bool = False
+    skip_duplicate_selection: bool = False
+    record_preferences: bool = True
+    scene_label: str = ""
     prescreen_rejected: list[str] = field(default_factory=list)
     prescreen_reject_reasons: dict[str, str] = field(default_factory=dict)
     prescreen_restored: list[str] = field(default_factory=list)
@@ -168,6 +172,9 @@ class JobState:
     near_seconds: int = NEAR_SECONDS
     prescreen_enabled: bool = True
     prescreen_strength: str = "standard"
+    skip_duplicate_selection: bool = False
+    record_preferences: bool = True
+    scene_label: str = ""
     face_aware: bool = True
     # 土豪模式：用户选定的 Ark 模型 ID
     llm_model: Optional[str] = None
@@ -200,6 +207,18 @@ def thumbs_dir(folder: str) -> Path:
 
 def skipped_log_path(folder: str) -> Path:
     return pic_dir(folder) / "skipped.log"
+
+
+def training_dir(folder: str) -> Path:
+    return pic_dir(folder) / "training"
+
+
+def decisions_log_path(folder: str) -> Path:
+    return training_dir(folder) / "decisions.jsonl"
+
+
+def training_salt_path(folder: str) -> Path:
+    return training_dir(folder) / ".salt"
 
 
 def state_path(folder: str) -> Path:
@@ -460,6 +479,9 @@ def save_state(state: SessionState) -> None:
         "prescreen_enabled": state.prescreen_enabled,
         "prescreen_strength": state.prescreen_strength,
         "prescreen_reviewed": state.prescreen_reviewed,
+        "skip_duplicate_selection": state.skip_duplicate_selection,
+        "record_preferences": state.record_preferences,
+        "scene_label": state.scene_label,
         "prescreen_rejected": state.prescreen_rejected,
         "prescreen_reject_reasons": state.prescreen_reject_reasons,
         "prescreen_restored": state.prescreen_restored,
@@ -498,6 +520,13 @@ def _migrate_state(data: dict) -> dict:
         # v5 → v6: 加 RAW+JPG 配对支持
         data.setdefault("companions", {})
         data["schema"] = 6
+        schema = 6
+    if schema == 6:
+        # v6 → v7: 加可跳过重复照片/擂台筛选流程的开关
+        data.setdefault("skip_duplicate_selection", False)
+        data.setdefault("record_preferences", True)
+        data.setdefault("scene_label", "")
+        data["schema"] = 7
         return data
     raise ValueError(
         f"state schema {schema} 太旧（仅支持 v4+）。"
@@ -526,6 +555,9 @@ def load_state(folder: str) -> Optional[SessionState]:
             prescreen_enabled=data.get("prescreen_enabled", True),
             prescreen_strength=data.get("prescreen_strength", "standard"),
             prescreen_reviewed=data.get("prescreen_reviewed", False),
+            skip_duplicate_selection=data.get("skip_duplicate_selection", False),
+            record_preferences=data.get("record_preferences", True),
+            scene_label=data.get("scene_label", ""),
             prescreen_rejected=data.get("prescreen_rejected", []),
             prescreen_reject_reasons=data.get("prescreen_reject_reasons", {}),
             prescreen_restored=data.get("prescreen_restored", []),
@@ -768,6 +800,9 @@ def build_prescreen_session_from_infos(
     prescreen_enabled: bool,
     prescreen_strength: str,
     engine: str = "fast",
+    skip_duplicate_selection: bool = False,
+    record_preferences: bool = True,
+    scene_label: str = "",
 ) -> SessionState:
     rejected, reasons = _prescreen_rejections(infos) if prescreen_enabled else ([], {})
     state = SessionState(
@@ -781,12 +816,99 @@ def build_prescreen_session_from_infos(
         near_seconds=near_seconds,
         prescreen_enabled=prescreen_enabled,
         prescreen_strength=prescreen_strength,
+        skip_duplicate_selection=skip_duplicate_selection,
+        record_preferences=record_preferences,
+        scene_label=scene_label,
         prescreen_reviewed=False,
         prescreen_rejected=rejected,
         prescreen_reject_reasons=reasons,
         prescreen_restored=[],
         meta={i.path: _meta_entry(i) for i in infos},
+        companions={
+            i.path: list(getattr(i, "companions", None) or [])
+            for i in infos
+            if getattr(i, "companions", None)
+        },
     )
+    save_state(state)
+    return state
+
+
+def build_keep_all_session_from_infos(
+    folder: str,
+    dry_run: bool,
+    mode: str,
+    infos: list[ImageInfo],
+    threshold_near: int,
+    threshold_far: int,
+    near_seconds: int,
+    prescreen_enabled: bool,
+    prescreen_strength: str,
+    engine: str = "fast",
+    prescreen_rejected: Optional[list[str]] = None,
+    prescreen_reject_reasons: Optional[dict[str, str]] = None,
+    prescreen_restored: Optional[list[str]] = None,
+    record_preferences: bool = True,
+    scene_label: str = "",
+) -> SessionState:
+    """跳过重复筛选时，把通过初筛的照片直接保留为 winner。"""
+    rejected = list(prescreen_rejected or [])
+    reasons = dict(prescreen_reject_reasons or {})
+    restored = list(prescreen_restored or [])
+    rejected_set = set(rejected)
+    restored_set = set(restored)
+
+    groups: list[GroupState] = []
+    for info in infos:
+        if info.path in rejected_set and info.path not in restored_set:
+            continue
+        groups.append(GroupState(
+            images=[info.path],
+            winner=info.path,
+            finished=True,
+            auto_selected=True,
+        ))
+
+    for path in rejected:
+        if path in restored_set:
+            continue
+        g = GroupState(
+            images=[path],
+            losers=[path],
+            finished=True,
+            auto_selected=True,
+            auto_rejected=[path],
+        )
+        g.auto_reject_reasons[path] = reasons.get(path, "智能初筛")
+        groups.append(g)
+
+    state = SessionState(
+        folder=folder,
+        dry_run=dry_run,
+        mode=mode,
+        engine=engine,
+        groups=groups,
+        threshold_near=threshold_near,
+        threshold_far=threshold_far,
+        near_seconds=near_seconds,
+        prescreen_enabled=prescreen_enabled,
+        prescreen_strength=prescreen_strength,
+        prescreen_reviewed=True,
+        skip_duplicate_selection=True,
+        record_preferences=record_preferences,
+        scene_label=scene_label,
+        prescreen_rejected=rejected,
+        prescreen_reject_reasons=reasons,
+        prescreen_restored=restored,
+        meta={i.path: _meta_entry(i) for i in infos},
+        companions={
+            i.path: list(getattr(i, "companions", None) or [])
+            for i in infos
+            if getattr(i, "companions", None)
+        },
+    )
+    save_state(state)
+    apply_pending_groups(state)
     save_state(state)
     return state
 
@@ -1032,7 +1154,10 @@ def build_session_from_groups(folder: str, dry_run: bool, mode: str,
                               near_seconds: int,
                               prescreen_enabled: bool = True,
                               prescreen_strength: str = "standard",
-                              engine: str = "fast") -> SessionState:
+                              engine: str = "fast",
+                              skip_duplicate_selection: bool = False,
+                              record_preferences: bool = True,
+                              scene_label: str = "") -> SessionState:
     # 全局主角识别（pre-pass：所有照片做一次脸簇）—— expert 模式才有 face embedding
     main_subjects = (
         _identify_main_subjects(infos)
@@ -1057,7 +1182,11 @@ def build_session_from_groups(folder: str, dry_run: bool, mode: str,
         folder=folder, dry_run=dry_run, mode=mode, engine=engine, groups=groups,
         threshold_near=threshold_near, threshold_far=threshold_far,
         near_seconds=near_seconds, prescreen_enabled=prescreen_enabled,
-        prescreen_strength=prescreen_strength, prescreen_reviewed=False, meta=meta,
+        prescreen_strength=prescreen_strength, prescreen_reviewed=False,
+        skip_duplicate_selection=skip_duplicate_selection,
+        record_preferences=record_preferences,
+        scene_label=scene_label,
+        meta=meta,
         companions=companions,
     )
     save_state(state)
@@ -1180,12 +1309,29 @@ def _do_transfer(src: str, dst: Path, mode: str) -> tuple[bool, Optional[str]]:
         return False, str(e)
 
 
-def _date_bucket_for(path: str, session: Optional[SessionState]) -> str:
+def _face_category_for(path: str, session: Optional[SessionState]) -> str:
     meta = (session.meta.get(path) if session else None) or {}
-    dt = str(meta.get("datetime") or "")
-    if len(dt) >= 10 and dt[4] == "-" and dt[7] == "-":
-        return dt[:10]
-    return "unknown_date"
+    try:
+        face_count = int(meta.get("face_count") or 0)
+    except (TypeError, ValueError):
+        face_count = 0
+    if face_count <= 0:
+        return "风景"
+    if face_count <= 2:
+        return "人像"
+    return "合照"
+
+
+def _relative_parent_parts(path: str, folder: str) -> tuple[str, ...]:
+    try:
+        rel_parent = Path(path).resolve().parent.relative_to(Path(folder).resolve())
+    except (OSError, ValueError):
+        return ()
+    if not rel_parent.parts:
+        return ()
+    if rel_parent.parts[0] in {"winners", "losers", "review", PIC_DIR}:
+        return ()
+    return tuple(rel_parent.parts)
 
 
 def _loser_category_for(path: str, group: GroupState) -> str:
@@ -1210,13 +1356,14 @@ def _loser_category_for(path: str, group: GroupState) -> str:
 def _archive_dir_for(kind: str, folder: str, path: str,
                      group: Optional[GroupState],
                      session: Optional[SessionState]) -> Path:
+    rel_parts = _relative_parent_parts(path, folder)
     if kind == "winner":
-        return winners_dir(folder) / _date_bucket_for(path, session)
+        return winners_dir(folder) / _face_category_for(path, session) / Path(*rel_parts)
     if kind == "restored":
-        return review_dir(folder) / "召回保留"
+        return review_dir(folder) / _face_category_for(path, session) / Path(*rel_parts) / "召回保留"
     if kind == "loser" and group is not None:
-        return losers_dir(folder) / _loser_category_for(path, group)
-    return losers_dir(folder) / "重复落选"
+        return losers_dir(folder) / _loser_category_for(path, group) / Path(*rel_parts)
+    return losers_dir(folder) / "重复落选" / Path(*rel_parts)
 
 
 def _find_archived_by_name(root: Path, name: str) -> Optional[Path]:
@@ -1229,6 +1376,22 @@ def _find_archived_by_name(root: Path, name: str) -> Optional[Path]:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _actual_kept_path(group: GroupState, original: str, folder: str) -> str:
+    """找到 winner/review 里的真实保留文件，copy 模式优先用归档副本。"""
+    for entry in reversed(group.move_log):
+        if entry.get("src") == original and entry.get("kind") in {"winner", "restored"}:
+            dst = entry.get("dst", "")
+            if dst and Path(dst).exists():
+                return dst
+    for root in (winners_dir(folder), review_dir(folder)):
+        candidate = _find_archived_by_name(root, Path(original).name)
+        if candidate:
+            return str(candidate)
+    if Path(original).exists():
+        return original
+    return original
 
 
 def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
@@ -1382,7 +1545,18 @@ def _transfer_main_with_companions(
       companion_pairs: list    [(src, dst), ...]，成功搬的 companions
       companion_failed: list   [{"path", "reason"}, ...]
     """
-    target = _unique_target(target_dir, Path(src_main).name)
+    src_path = Path(src_main)
+    if mode == "move":
+        try:
+            if src_path.resolve().parent == target_dir.resolve():
+                return {
+                    "ok": True, "main_target": str(src_path), "main_error": None,
+                    "companion_pairs": [(c, c) for c in companions if Path(c).exists()],
+                    "companion_failed": [],
+                }
+        except OSError:
+            pass
+    target = _unique_target(target_dir, src_path.name)
     ok, err = _do_transfer(src_main, target, mode)
     if not ok:
         return {
@@ -1910,11 +2084,87 @@ def _record_skipped(folder: str, items: list[tuple[str, str]]) -> None:
         logger.warning(f"写 skipped.log 失败: {e}")
 
 
+TRAINING_FEATURE_KEYS = (
+    "quality_score", "face_count", "aesthetic_score", "musiq_score", "clipiqa_score",
+    "blur_score", "face_sharpness", "salient_sharpness",
+    "overexposed_ratio", "underexposed_ratio", "brightness_mean", "brightness_std",
+    "contrast_score", "entropy", "width", "height", "file_size",
+    "eyes_open_score", "face_clipped",
+)
+
+
+def _training_salt(folder: str) -> str:
+    p = training_salt_path(folder)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.exists():
+        try:
+            value = p.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except OSError:
+            pass
+    value = uuid.uuid4().hex
+    try:
+        p.write_text(value, encoding="utf-8")
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return value
+
+
+def _anon_image_id(path: str, session: Optional[SessionState] = None) -> str:
+    folder = session.folder if session else ""
+    salt = _training_salt(folder) if folder else uuid.uuid4().hex
+    return hashlib.sha256(f"{salt}|{Path(path).resolve()}".encode("utf-8")).hexdigest()[:24]
+
+
+def _training_features_for(path: str, session: Optional[SessionState]) -> dict:
+    meta = (session.meta.get(path) if session else None) or {}
+    out: dict = {}
+    for key in TRAINING_FEATURE_KEYS:
+        value = meta.get(key)
+        if value is not None:
+            out[key] = value
+    flags = meta.get("flags")
+    if flags:
+        out["flags"] = list(flags) if isinstance(flags, list) else []
+    return out
+
+
+def _training_image_payload(path: str, session: SessionState) -> dict:
+    return {
+        "image_id": _anon_image_id(path, session),
+        "features": _training_features_for(path, session),
+    }
+
+
+def _append_training_decision(session: Optional[SessionState], payload: dict) -> None:
+    if session is None or not session.record_preferences:
+        return
+    try:
+        path = decisions_log_path(session.folder)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "schema": 1,
+            "app": "xiaoyang-photo-picker",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "mode": session.mode,
+            "engine": session.engine,
+            "runtime": session.runtime,
+            "scene_label": session.scene_label or "",
+            **payload,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as e:
+        logger.warning(f"写训练数据失败: {e}")
+
+
 def _wipe_caches(folder: str) -> None:
     """全新开始：把目录恢复到"从没用过本工具"的状态。
 
-    - copy 模式：winners/ losers/ 是副本，原图还在根目录 → 直接删 winners/ losers/。
-    - move 模式：winners/ losers/ 里就是原图本体 → 把文件搬回根目录再删空目录。
+    - copy 模式：winners/ losers/ review/ 是副本，原图还在根目录 → 直接删除输出目录。
+    - move 模式：输出目录里就是原图本体 → 把文件搬回根目录再删空目录。
     - 同时清掉 phash 缓存、session 进度、_pic_selecter/（日志/缩略图/skipped）。
     """
     # 先读上次的 mode（在删 state 之前），决定 winners/losers 怎么处理。
@@ -1931,13 +2181,13 @@ def _wipe_caches(folder: str) -> None:
             logger.warning(f"读 state 判断 mode 失败，按 move 兜底处理: {e}")
 
     root = Path(folder)
-    for sub in ("winners", "losers"):
+    for sub in ("winners", "losers", "review"):
         d = root / sub
         if not d.is_dir():
             continue
         if prev_mode == "move":
             # 把文件搬回根目录（重名时加 _1 _2 后缀）
-            for f in list(d.iterdir()):
+            for f in list(d.rglob("*")):
                 if not f.is_file():
                     continue
                 target = _unique_target(root, f.name)
@@ -1960,7 +2210,13 @@ def _wipe_caches(folder: str) -> None:
     pd = pic_dir(folder)
     if pd.exists():
         try:
-            shutil.rmtree(pd)
+            for child in pd.iterdir():
+                if child.name == "training":
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
         except OSError as e:
             logger.warning(f"清 _pic_selecter 目录失败: {e}")
 
@@ -2014,7 +2270,10 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
              threshold_near: int, threshold_far: int, near_seconds: int,
              prescreen_enabled: bool, prescreen_strength: str,
              face_aware: bool = True, engine: str = "fast",
-             llm_model: Optional[str] = None) -> None:
+             llm_model: Optional[str] = None,
+             skip_duplicate_selection: bool = False,
+             record_preferences: bool = True,
+             scene_label: str = "") -> None:
     global SESSION, LAST_INFOS
     job = JOB
     assert job is not None
@@ -2031,6 +2290,9 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
             mode=mode,
             dry_run=dry_run,
             prescreen=f"{prescreen_enabled}/{prescreen_strength}",
+            skip_duplicate_selection=skip_duplicate_selection,
+            record_preferences=record_preferences,
+            scene_label=scene_label,
             face_aware=face_aware,
             llm_model=llm_model or "(none)",
             threshold_near=threshold_near,
@@ -2060,10 +2322,11 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
             progress=_job_progress,
             cancel_check=_cancel_check,
             strength=prescreen_strength if prescreen_enabled else "standard",
-            face_aware=face_aware and prescreen_enabled and engine == "expert",
+            face_aware=True if engine == "expert" else face_aware,
             event_cb=_job_event,
             engine=engine,
             llm_model=llm_model,
+            archive_face_classification=True,
         )
         if _cancel_check():
             raise CancelledError()
@@ -2084,6 +2347,9 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
                 folder, dry_run, mode, infos,
                 threshold_near, threshold_far, near_seconds,
                 prescreen_enabled, prescreen_strength, engine=engine,
+                skip_duplicate_selection=skip_duplicate_selection,
+                record_preferences=record_preferences,
+                scene_label=scene_label,
             )
             if _cancel_check() or job.status == "cancelled":
                 raise CancelledError()
@@ -2108,6 +2374,38 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
                 )
             return
 
+        if skip_duplicate_selection:
+            sess = build_keep_all_session_from_infos(
+                folder, dry_run, mode, infos,
+                threshold_near, threshold_far, near_seconds,
+                prescreen_enabled=False,
+                prescreen_strength=prescreen_strength,
+                engine=engine,
+                record_preferences=record_preferences,
+                scene_label=scene_label,
+            )
+            sess.runtime = _normalize_runtime(os.environ.get("PIC_SELECTER_RUNTIME"))
+            save_state(sess)
+            if _cancel_check() or job.status == "cancelled":
+                raise CancelledError()
+            with LOCK:
+                SESSION = sess
+                LAST_INFOS = infos
+            job.status = "done"
+            job.label = f"跳过重复筛选，已保留 {len(infos)} 张可读取照片"
+            job.done = job.total = len(sess.groups)
+            job.finished_at = time.time()
+            if jlog:
+                jlog.footer(
+                    status="done(skip_duplicate)",
+                    extra={
+                        "winners": len(infos),
+                        "skipped": len(skipped),
+                        "label": job.label,
+                    },
+                )
+            return
+
         job.status = "grouping"
         job.label = "构建分组..."
         raw_groups = group_infos(
@@ -2123,6 +2421,9 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
             prescreen_enabled=False,
             prescreen_strength=prescreen_strength,
             engine=engine,
+            skip_duplicate_selection=skip_duplicate_selection,
+            record_preferences=record_preferences,
+            scene_label=scene_label,
         )
         sess.runtime = _normalize_runtime(os.environ.get("PIC_SELECTER_RUNTIME"))
         sess.prescreen_enabled = prescreen_enabled
@@ -2340,6 +2641,9 @@ def api_start():
     if prescreen_strength not in ("standard", "advanced"):
         prescreen_strength = "standard"
     face_aware = bool(data.get("face_aware", True))
+    skip_duplicate_selection = bool(data.get("skip_duplicate_selection", False))
+    record_preferences = bool(data.get("record_preferences", True))
+    scene_label = str(data.get("scene_label") or "").strip()[:80]
 
     if not folder:
         return jsonify({"error": "请填写文件夹路径"}), 400
@@ -2348,6 +2652,18 @@ def api_start():
         return jsonify({"error": f"目录不存在: {folder}"}), 400
     if engine == "tycoon" and not llm_model:
         return jsonify({"error": "土豪模式需要选择 LLM 模型"}), 400
+    if engine == "fast":
+        try:
+            from pic_selecter import vision
+            vision.require_face_capabilities()
+        except Exception as e:
+            return jsonify({
+                "error": (
+                    "极速模式按人脸数量分类需要本地 InsightFace/onnxruntime 可用。"
+                    "请安装视觉依赖，或改用已可用的专家/土豪模式。"
+                    f"（{e}）"
+                )
+            }), 400
 
     with LOCK:
         if JOB and JOB.status in ("pending", "scanning", "hashing", "grouping"):
@@ -2362,6 +2678,9 @@ def api_start():
             threshold_near=threshold_near, threshold_far=threshold_far,
             near_seconds=near_seconds, prescreen_enabled=prescreen_enabled,
             prescreen_strength=prescreen_strength,
+            skip_duplicate_selection=skip_duplicate_selection,
+            record_preferences=record_preferences,
+            scene_label=scene_label,
             face_aware=face_aware,
             llm_model=llm_model,
         )
@@ -2372,7 +2691,7 @@ def api_start():
         args=(folder, dry_run, mode, wipe_cache,
               threshold_near, threshold_far, near_seconds,
               prescreen_enabled, prescreen_strength, face_aware, engine,
-              llm_model),
+              llm_model, skip_duplicate_selection, record_preferences, scene_label),
         daemon=True,
     )
     t.start()
@@ -2439,6 +2758,9 @@ def api_job():
         "engine": JOB.engine,
         "prescreen_enabled": JOB.prescreen_enabled,
         "prescreen_strength": JOB.prescreen_strength,
+        "skip_duplicate_selection": JOB.skip_duplicate_selection,
+        "record_preferences": JOB.record_preferences,
+        "scene_label": JOB.scene_label,
         "done": JOB.done,
         "total": JOB.total,
         "label": JOB.label,
@@ -2502,6 +2824,9 @@ def api_status():
         "near_seconds": SESSION.near_seconds,
         "prescreen_enabled": SESSION.prescreen_enabled,
         "prescreen_strength": SESSION.prescreen_strength,
+        "skip_duplicate_selection": SESSION.skip_duplicate_selection,
+        "record_preferences": SESSION.record_preferences,
+        "scene_label": SESSION.scene_label,
         "prescreen_reviewed": SESSION.prescreen_reviewed,
         "prescreen_auto_rejected_count": auto_rejected,
         "prescreen_restored_count": auto_restored,
@@ -2628,7 +2953,7 @@ def _finalize_group_locked() -> None:
     save_state(SESSION)
 
 
-def _record_preference(left_path: Optional[str], right_path: Optional[str],
+def _record_preference(group: GroupState, left_path: Optional[str], right_path: Optional[str],
                         loser_side: str) -> None:
     """擂台每决一次，记一次用户在三维度上的倾向。"""
     if SESSION is None:
@@ -2641,6 +2966,8 @@ def _record_preference(left_path: Optional[str], right_path: Optional[str],
     rm = SESSION.meta.get(right_path) or {}
     winner_meta = rm if loser_side == "left" else lm
     loser_meta = lm if loser_side == "left" else rm
+    winner_path = right_path if loser_side == "left" else left_path
+    loser_path = left_path if loser_side == "left" else right_path
 
     def _f(d, k):
         v = d.get(k)
@@ -2675,6 +3002,14 @@ def _record_preference(left_path: Optional[str], right_path: Optional[str],
         else:
             SESSION.pref_brighter_passed += 1
 
+    _append_training_decision(SESSION, {
+        "decision_type": "pk",
+        "group_id": group.id,
+        "winner": _training_image_payload(winner_path, SESSION),
+        "loser": _training_image_payload(loser_path, SESSION),
+        "choice": "left" if winner_path == left_path else "right",
+    })
+
 
 @app.route("/api/choose", methods=["POST"])
 def api_choose():
@@ -2694,7 +3029,7 @@ def api_choose():
         left_before = g.left
         right_before = g.right
         advance(g, side)
-        _record_preference(left_before, right_before, side)
+        _record_preference(g, left_before, right_before, side)
         _finalize_group_locked()
     return api_group()
 
@@ -2920,11 +3255,7 @@ def api_winners():
             winners_in_group.append(g.winner)
         winners_in_group.extend(g.extra_winners)
         for w in winners_in_group:
-            actual = w
-            if not Path(actual).exists():
-                candidate = _find_archived_by_name(winners_dir(SESSION.folder), Path(actual).name)
-                if candidate:
-                    actual = str(candidate)
+            actual = _actual_kept_path(g, w, SESSION.folder)
             out.append({
                 "path": actual,
                 "name": Path(w).name,
@@ -3026,6 +3357,13 @@ def api_restore_rejected():
         if gid == "__prescreen__" and original_pre:
             if original_pre not in SESSION.prescreen_restored:
                 SESSION.prescreen_restored.append(original_pre)
+                _append_training_decision(SESSION, {
+                    "decision_type": "prescreen_restore",
+                    "image": _training_image_payload(original_pre, SESSION),
+                    "reject_reason": SESSION.prescreen_reject_reasons.get(original_pre, "智能初筛"),
+                    "source": "prescreen",
+                    "choice": "restore",
+                })
                 save_state(SESSION)
             return jsonify({"ok": True, "restored": True})
 
@@ -3125,6 +3463,14 @@ def api_restore_rejected():
             return jsonify({"error": failed}), 500
 
         group.manual_restored.append(original)
+        _append_training_decision(SESSION, {
+            "decision_type": "prescreen_restore",
+            "group_id": group.id,
+            "image": _training_image_payload(winner_path, SESSION),
+            "reject_reason": group.auto_reject_reasons.get(original, "智能初筛"),
+            "source": "group_auto_reject",
+            "choice": "restore",
+        })
         if winner_path not in group.extra_winners:
             group.extra_winners.append(winner_path)
         group.losers = [
@@ -3167,9 +3513,14 @@ def _run_grouping_async(accepted_infos, old_session_snapshot):
                 prescreen_enabled=False,
                 prescreen_strength=snap["prescreen_strength"],
                 engine=snap["engine"],
+                record_preferences=snap.get("record_preferences", True),
+                scene_label=snap.get("scene_label", ""),
             )
             new_session.prescreen_enabled = snap["prescreen_enabled"]
             new_session.prescreen_strength = snap["prescreen_strength"]
+            new_session.skip_duplicate_selection = snap.get("skip_duplicate_selection", False)
+            new_session.record_preferences = snap.get("record_preferences", True)
+            new_session.scene_label = snap.get("scene_label", "")
             new_session.prescreen_rejected = list(snap["prescreen_rejected"])
             new_session.prescreen_reject_reasons = dict(snap["prescreen_reject_reasons"])
             new_session.prescreen_restored = list(snap["prescreen_restored"])
@@ -3239,6 +3590,27 @@ def api_confirm_prescreen():
         ]
         all_paths = [info.path for info in accepted_infos]
 
+        if SESSION.skip_duplicate_selection:
+            new_session = build_keep_all_session_from_infos(
+                SESSION.folder,
+                SESSION.dry_run,
+                SESSION.mode,
+                infos,
+                SESSION.threshold_near,
+                SESSION.threshold_far,
+                SESSION.near_seconds,
+                prescreen_enabled=SESSION.prescreen_enabled,
+                prescreen_strength=SESSION.prescreen_strength,
+                engine=SESSION.engine,
+                prescreen_rejected=list(SESSION.prescreen_rejected),
+                prescreen_reject_reasons=dict(SESSION.prescreen_reject_reasons),
+                prescreen_restored=list(SESSION.prescreen_restored),
+                record_preferences=SESSION.record_preferences,
+                scene_label=SESSION.scene_label,
+            )
+            SESSION = new_session
+            return jsonify({"ok": True, "async": False, "all_paths": all_paths})
+
         _GROUPING["status"] = "running"
         _GROUPING["groups"] = []
         _GROUPING["all_paths"] = all_paths
@@ -3256,6 +3628,9 @@ def api_confirm_prescreen():
             "mode": SESSION.mode,
             "prescreen_enabled": SESSION.prescreen_enabled,
             "prescreen_strength": SESSION.prescreen_strength,
+            "skip_duplicate_selection": SESSION.skip_duplicate_selection,
+            "record_preferences": SESSION.record_preferences,
+            "scene_label": SESSION.scene_label,
             "prescreen_rejected": list(SESSION.prescreen_rejected),
             "prescreen_reject_reasons": dict(SESSION.prescreen_reject_reasons),
             "prescreen_restored": list(SESSION.prescreen_restored),
@@ -3301,6 +3676,87 @@ def api_skipped():
     return jsonify({"skipped": out[-200:]})
 
 
+@app.route("/api/training_export")
+def api_training_export():
+    if SESSION is None:
+        return jsonify({"error": "no session"}), 400
+    include_thumbnails = str(request.args.get("include_thumbnails", "")).lower() in {"1", "true", "yes"}
+    decisions_path = decisions_log_path(SESSION.folder)
+    decisions_text = ""
+    decision_count = 0
+    if decisions_path.exists():
+        decisions_text = decisions_path.read_text(encoding="utf-8")
+        decision_count = sum(1 for line in decisions_text.splitlines() if line.strip())
+
+    feature_lines: list[str] = []
+    seen_ids: set[str] = set()
+    for path in sorted(SESSION.meta.keys()):
+        image_id = _anon_image_id(path, SESSION)
+        if image_id in seen_ids:
+            continue
+        seen_ids.add(image_id)
+        feature_lines.append(json.dumps({
+            "schema": 1,
+            "image_id": image_id,
+            "features": _training_features_for(path, SESSION),
+        }, ensure_ascii=False, sort_keys=True))
+    features_text = "\n".join(feature_lines) + ("\n" if feature_lines else "")
+
+    meta = {
+        "schema": 1,
+        "app": "xiaoyang-photo-picker",
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "engine": SESSION.engine,
+        "runtime": SESSION.runtime,
+        "mode": SESSION.mode,
+        "scene_label": SESSION.scene_label or "",
+        "decision_count": decision_count,
+        "feature_count": len(feature_lines),
+        "contains_images": include_thumbnails,
+        "privacy": {
+            "contains_original_paths": False,
+            "contains_exif_gps": False,
+            "image_ids": "salted_sha256_prefix_24",
+        },
+    }
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("decisions.jsonl", decisions_text)
+        zf.writestr("features.jsonl", features_text)
+        zf.writestr("session_meta.json", json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True))
+        if include_thumbnails:
+            for path in sorted(SESSION.meta.keys()):
+                p = Path(path)
+                if not p.exists():
+                    continue
+                image_id = _anon_image_id(path, SESSION)
+                try:
+                    img = _safe_open_image(p)
+                    if img is None:
+                        continue
+                    try:
+                        img = ImageOps.exif_transpose(img)
+                        img.thumbnail((512, 512), Image.LANCZOS)
+                        if img.mode in ("RGBA", "P"):
+                            img = img.convert("RGB")
+                        thumb = io.BytesIO()
+                        img.save(thumb, "JPEG", quality=82)
+                        zf.writestr(f"thumbnails/{image_id}.jpg", thumb.getvalue())
+                    finally:
+                        img.close()
+                except Exception:
+                    continue
+    buf.seek(0)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"training_export_{stamp}.zip",
+    )
+
+
 @app.route("/api/regroup", methods=["POST"])
 def api_regroup():
     """用新阈值重新分组（不重哈希）。仅在 SESSION 已存在且 LAST_INFOS 可用时有效。"""
@@ -3314,6 +3770,8 @@ def api_regroup():
         return jsonify({"error": "no session"}), 400
     if any(g.applied for g in SESSION.groups):
         return jsonify({"error": "已经开始处理，无法重新分组"}), 400
+    if SESSION.skip_duplicate_selection:
+        return jsonify({"error": "已选择跳过重复筛选，无法重新分组"}), 400
 
     infos = LAST_INFOS
     if not infos:
@@ -3336,10 +3794,15 @@ def api_regroup():
         prescreen_enabled=False,
         prescreen_strength=SESSION.prescreen_strength,
         engine=SESSION.engine,
+        record_preferences=SESSION.record_preferences,
+        scene_label=SESSION.scene_label,
     )
     new_session.prescreen_enabled = SESSION.prescreen_enabled
     new_session.prescreen_strength = SESSION.prescreen_strength
     new_session.prescreen_reviewed = SESSION.prescreen_reviewed
+    new_session.skip_duplicate_selection = SESSION.skip_duplicate_selection
+    new_session.record_preferences = SESSION.record_preferences
+    new_session.scene_label = SESSION.scene_label
     new_session.prescreen_rejected = list(SESSION.prescreen_rejected)
     new_session.prescreen_reject_reasons = dict(SESSION.prescreen_reject_reasons)
     new_session.prescreen_restored = list(SESSION.prescreen_restored)
@@ -3350,6 +3813,88 @@ def api_regroup():
         "total_groups": len(SESSION.groups),
         "multi_groups": sum(1 for g in SESSION.groups if len(g.images) > 1),
         "max_group_size": max((len(g.images) for g in SESSION.groups), default=0),
+    })
+
+
+@app.route("/api/refine_winners", methods=["POST"])
+def api_refine_winners():
+    """只拿当前已保留照片重新分组 PK。
+
+    二次 PK 使用 move 模式：保留的继续留在 winners/，不要的进入 losers/重复落选/。
+    """
+    global SESSION, LAST_INFOS
+    if SESSION is None:
+        return jsonify({"error": "no session"}), 400
+    if any(not g.finished for g in SESSION.groups):
+        return jsonify({"error": "当前还有未完成的组，请先完成本轮选片"}), 400
+
+    with LOCK:
+        old_session = SESSION
+        info_by_path = {i.path: i for i in (LAST_INFOS or [])}
+        refined_infos: list[ImageInfo] = []
+        seen: set[str] = set()
+
+        for g in old_session.groups:
+            kept = ([g.winner] if g.winner else []) + list(g.extra_winners)
+            for original in kept:
+                actual = _actual_kept_path(g, original, old_session.folder)
+                if not Path(actual).exists() or actual in seen:
+                    continue
+                seen.add(actual)
+                base_info = info_by_path.get(original) or info_by_path.get(actual)
+                if base_info is None:
+                    return jsonify({
+                        "error": (
+                            "缺少保留照片的分析数据，无法直接继续 PK。"
+                            "请重新开始一次并取消“跳过重复照片筛选”。"
+                        )
+                    }), 400
+                refined_infos.append(replace(
+                    base_info,
+                    path=actual,
+                    companions=[],
+                    face_embeddings=[],
+                ))
+
+        if len(refined_infos) < 2:
+            return jsonify({"error": "保留照片少于 2 张，无需继续分组 PK"}), 400
+
+        raw_groups = group_infos(
+            refined_infos,
+            threshold_near=old_session.threshold_near,
+            threshold_far=old_session.threshold_far,
+            near_seconds=old_session.near_seconds,
+            engine=old_session.engine,
+        )
+        new_session = build_session_from_groups(
+            old_session.folder,
+            dry_run=False,
+            mode="move",
+            raw_groups=raw_groups,
+            infos=refined_infos,
+            threshold_near=old_session.threshold_near,
+            threshold_far=old_session.threshold_far,
+            near_seconds=old_session.near_seconds,
+            prescreen_enabled=False,
+            prescreen_strength=old_session.prescreen_strength,
+            engine=old_session.engine,
+            skip_duplicate_selection=False,
+            record_preferences=old_session.record_preferences,
+            scene_label=old_session.scene_label,
+        )
+        new_session.runtime = old_session.runtime
+        new_session.prescreen_enabled = False
+        new_session.prescreen_reviewed = True
+        new_session.skip_duplicate_selection = False
+        save_state(new_session)
+        SESSION = new_session
+        LAST_INFOS = refined_infos
+
+    return jsonify({
+        "ok": True,
+        "total_groups": len(SESSION.groups),
+        "multi_groups": sum(1 for g in SESSION.groups if len(g.images) > 1),
+        "image_count": sum(len(g.images) for g in SESSION.groups),
     })
 
 
@@ -3618,11 +4163,7 @@ def _winner_paths() -> list[str]:
     paths: list[str] = []
     for g in SESSION.groups:
         for w in ([g.winner] if g.winner else []) + list(g.extra_winners):
-            actual = w
-            if not Path(actual).exists():
-                cand = _find_archived_by_name(winners_dir(SESSION.folder), Path(actual).name)
-                if cand:
-                    actual = str(cand)
+            actual = _actual_kept_path(g, w, SESSION.folder)
             if Path(actual).exists():
                 paths.append(actual)
     return paths

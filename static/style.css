@@ -329,6 +329,23 @@ code {
 }
 .check input { accent-color: var(--accent); width: 14px; height: 14px; }
 
+#scene-label-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--ink);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+#scene-label-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
 .form-error {
   margin: 14px 0 0;
   color: var(--accent-deep);

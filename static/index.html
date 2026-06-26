@@ -147,9 +147,25 @@
                 <span>智能初筛 · 先自动淘汰明显的失焦 / 闭眼 / 过曝</span>
               </label>
               <label class="check">
+                <input type="checkbox" id="opt-skip-duplicate">
+                <span>跳过重复照片筛选 · 初筛后全部保留</span>
+              </label>
+              <label class="check">
                 <input type="checkbox" id="opt-face-aware" checked>
                 <span>人脸感知 · 主体锐度评估 + 闭眼检测（约 +0.3 秒/张）</span>
               </label>
+              <label class="check">
+                <input type="checkbox" id="opt-record-preferences" checked>
+                <span>本地记录筛选偏好 · 仅保存匿名特征与选择，不上传照片</span>
+              </label>
+              <label class="field-label" for="scene-label-input">场景标签</label>
+              <input
+                type="text"
+                id="scene-label-input"
+                placeholder="例如：旅行 / 婚礼 / 亲子 / 活动"
+                maxlength="80"
+                spellcheck="false"
+              >
             </div>
 
             <div class="opt-section">
@@ -613,6 +629,8 @@
     <div class="done-h-right">
       <button id="btn-open-folder" class="btn-ghost">打开文件夹</button>
       <button id="btn-watermark" class="btn-ghost" title="给胜出照片批量加相机品牌水印">相机水印</button>
+      <button id="btn-export-training" class="btn-ghost" title="导出匿名训练数据包">导出训练数据</button>
+      <button id="btn-refine-winners" class="btn-ghost" title="只对这次留下的照片继续分组 PK">继续筛保留照片</button>
       <button id="btn-redo-folder" class="btn-ghost" title="清掉本次结果，重新挑这个文件夹">重做本次</button>
       <button class="btn-ghost btn-go-home" title="回到主页">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">

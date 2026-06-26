@@ -374,6 +374,7 @@ def _process_one(path: str, strength: str = "standard",
                  engine: str = "expert",
                  llm_model: Optional[str] = None,
                  companions: Optional[list[str]] = None,
+                 archive_face_classification: bool = False,
                  ) -> tuple[Optional[ImageInfo], Optional[str]]:
     """返回 (info, error_reason)。失败时 info=None。
 
@@ -407,6 +408,9 @@ def _process_one(path: str, strength: str = "standard",
         if engine == "fast":
             from pic_selecter.fast_quality import analyze_image_fast
             quality_info = analyze_image_fast(img_t, st.st_size, strength=strength)
+            if archive_face_classification:
+                from pic_selecter import vision
+                quality_info.face_count = len(vision.extract_faces(img_t))
             # 多 hash 签名 —— 四个 hash 都是必须的，任一失败让这张图归 skipped
             dh = str(imagehash.dhash(img_t, hash_size=8))
             wh = str(imagehash.whash(img_t, hash_size=8))
@@ -545,6 +549,12 @@ def _process_one(path: str, strength: str = "standard",
             face_embeddings=face_embs,
         ), None
     except Exception as e:
+        try:
+            from pic_selecter import vision
+            if isinstance(e, vision.VisionUnavailable):
+                raise
+        except ImportError:
+            pass
         return None, f"解码失败: {type(e).__name__}: {e}"
     finally:
         if img is not None:
@@ -572,7 +582,7 @@ def scan_folder(folder: str) -> list[tuple[str, list[str]]]:
     groups: dict[tuple[str, str], list[str]] = {}
     for root, _, names in os.walk(p):
         rel = Path(root).relative_to(p)
-        if rel.parts and rel.parts[0] in {"winners", "losers", "_pic_selecter"}:
+        if rel.parts and rel.parts[0] in {"winners", "losers", "review", "_pic_selecter"}:
             continue
         for n in names:
             suffix = Path(n).suffix.lower()
@@ -630,6 +640,7 @@ def compute_infos(
     event_cb: Optional[Callable[[str, str, Optional["ImageInfo"], Optional[str]], None]] = None,
     engine: str = "expert",
     llm_model: Optional[str] = None,
+    archive_face_classification: bool = False,
 ) -> tuple[list[ImageInfo], list[tuple[str, str]]]:
     """读取每张图片的 pHash + 时间戳 + EXIF 摘要，加上 engine 对应的额外签名。
 
@@ -669,6 +680,15 @@ def compute_infos(
                 f"必须安装 rawpy 才能处理：pip install 'rawpy>=0.18'。"
                 f"（例：{Path(raw_without_jpg_companion[0]).name}）"
             ) from e
+    if archive_face_classification and engine == "fast":
+        try:
+            from pic_selecter import vision
+            vision.require_face_capabilities()
+        except Exception as e:
+            raise RuntimeError(
+                "极速模式按人脸数量分类需要本地 InsightFace/onnxruntime 可用。"
+                "请安装视觉依赖，或改用已可用的专家/土豪模式。"
+            ) from e
     needed: list[str] = []
     fresh: dict[str, ImageInfo] = {}
     skipped: list[tuple[str, str]] = []
@@ -707,7 +727,7 @@ def compute_infos(
             futures = {
                 ex.submit(
                     _process_one, f, strength, face_aware, engine, llm_model,
-                    companions_by_primary.get(f, []),
+                    companions_by_primary.get(f, []), archive_face_classification,
                 ): f
                 for f in needed
             }

@@ -717,6 +717,15 @@ def require_tycoon_capabilities() -> None:
         )
 
 
+def require_face_capabilities() -> None:
+    """仅做人脸数量分类时需要的最小依赖。"""
+    caps = capabilities()
+    if not caps.get("face_id"):
+        raise VisionUnavailable(
+            "按人脸数量分类缺少依赖：InsightFace / onnxruntime。请按 requirements.txt 安装。"
+        )
+
+
 def prewarm_all() -> None:
     """专家模式预热全部模型；任一失败抛出。"""
     _ensure_dinov2()

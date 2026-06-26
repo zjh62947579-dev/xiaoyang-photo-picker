@@ -616,6 +616,9 @@ async function handleStart(e) {
   const engine = currentEngine();
   const runtime = currentRuntime();
   const prescreen_enabled = $("opt-prescreen").checked;
+  const skip_duplicate_selection = $("opt-skip-duplicate")?.checked || false;
+  const record_preferences = $("opt-record-preferences")?.checked !== false;
+  const scene_label = ($("scene-label-input")?.value || "").trim();
   const prescreen_strength = document.querySelector('input[name="prescreen-strength"]:checked')?.value || "standard";
   // 极速模式后端会强制忽略 face_aware，这里也明确传 false 避免歧义
   const face_aware = engine === "expert" && $("opt-face-aware").checked;
@@ -628,7 +631,7 @@ async function handleStart(e) {
   if (mode === "move" && !dry_run && !localStorage.getItem(CONFIRM_MOVE_KEY)) {
     const ok = await confirmDialog(
       "确认移动文件",
-      '选择"移动"模式：原文件会被搬到 winners/ 与 losers/。强烈推荐"复制"模式以便反悔。继续？'
+      '选择"移动"模式：原文件会被搬到 winners/、losers/ 与 review/。强烈推荐"复制"模式以便反悔。继续？'
     );
     if (!ok) return;
     localStorage.setItem(CONFIRM_MOVE_KEY, "1");
@@ -656,7 +659,8 @@ async function handleStart(e) {
       body: JSON.stringify({
         folder, dry_run, wipe_cache, mode, engine, runtime,
         threshold_near, threshold_far, near_seconds,
-        prescreen_enabled, prescreen_strength, face_aware,
+        prescreen_enabled, prescreen_strength, skip_duplicate_selection,
+        record_preferences, scene_label, face_aware,
         llm_model,
       }),
     });
@@ -1532,6 +1536,7 @@ async function enterPreview(status) {
     return;
   }
   if (s.selection_started) { enterArena(); return; }
+  if (s.skip_duplicate_selection) { enterDone(s); return; }
 
   showView("preview");
   $("prv-near").value = s.threshold_near;
@@ -2260,7 +2265,23 @@ document.addEventListener("keydown", (e) => {
 // =================================================================
 // 完成页
 // =================================================================
-async function renderWinnersAlbum() {
+let doneAlbumScrollY = 0;
+
+function rememberDoneScroll() {
+  if ($("view-done")?.classList.contains("active")) {
+    doneAlbumScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+  }
+}
+
+function restoreDoneScroll() {
+  if (!$("view-done")?.classList.contains("active")) return;
+  const y = doneAlbumScrollY || 0;
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
+async function renderWinnersAlbum(options = {}) {
+  const { preserveScroll = false } = options;
+  if (preserveScroll) rememberDoneScroll();
   const album = $("done-album");
   album.innerHTML = "";
   let list = [];
@@ -2314,6 +2335,7 @@ async function renderWinnersAlbum() {
     });
     album.appendChild(row);
   }
+  if (preserveScroll) restoreDoneScroll();
 }
 
 async function renderAutoRejectedGrid(options = {}) {
@@ -2356,7 +2378,7 @@ async function renderAutoRejectedGrid(options = {}) {
           card.classList.remove("is-busy");
           card.classList.add("is-restored");
           card.querySelector(".ar-reason").textContent = "已保留";
-          if (refreshWinners) await renderWinnersAlbum();
+          if (refreshWinners) await renderWinnersAlbum({ preserveScroll: true });
           const s = await fetchJSON("/api/status");
           if ($("view-done").classList.contains("active")) {
             $("stat-winners").textContent = s.winner_count || 0;
@@ -2384,6 +2406,7 @@ async function renderAutoRejectedGrid(options = {}) {
 async function enterDone(status) {
   showView("done");
   const s = status || lastSession || (await fetchJSON("/api/status"));
+  lastSession = s;
   const singles = (s.total_groups || 0) - (s.multi_groups || 0);
   const total = s.image_count || ((s.winner_count || 0) + (s.loser_count || 0));
   const kept = s.winner_count || 0;
@@ -2448,12 +2471,47 @@ $("btn-open-folder").addEventListener("click", async () => {
   catch (e) { toast("打开失败：" + e.message); }
 });
 
+$("btn-export-training").addEventListener("click", async () => {
+  const s = lastSession || (await fetchJSON("/api/status").catch(() => null));
+  if (!s || !s.folder) { toast("没有可导出的会话"); return; }
+  window.location.href = "/api/training_export";
+});
+
+$("btn-refine-winners").addEventListener("click", async () => {
+  const s = lastSession || (await fetchJSON("/api/status").catch(() => null));
+  if (!s || !s.folder) { toast("没有可继续筛选的会话"); return; }
+  if ((s.winner_count || 0) < 2) { toast("保留照片少于 2 张，无需继续 PK"); return; }
+  const ok = await confirmDialog(
+    "继续筛保留照片",
+    "只对当前 winners/ 和 review/ 中已保留的照片重新分组 PK。保留的继续留在 winners/，不要的会移到 losers/重复落选/。继续？"
+  );
+  if (!ok) return;
+  const btn = $("btn-refine-winners");
+  btn.disabled = true;
+  btn.textContent = "整理中…";
+  try {
+    const r = await fetchJSON("/api/refine_winners", { method: "POST" });
+    const next = await fetchJSON("/api/status");
+    toast(`已整理 ${r.image_count || 0} 张保留照片`);
+    if ((next.total_groups || 0) > 0 && next.finished_groups >= next.total_groups) {
+      enterDone(next);
+    } else {
+      enterPreview(next);
+    }
+  } catch (e) {
+    toast("继续筛选失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "继续筛保留照片";
+  }
+});
+
 $("btn-redo-folder").addEventListener("click", async () => {
   const s = lastSession || (await fetchJSON("/api/status").catch(() => null));
   if (!s || !s.folder) { toast("没有可重做的会话"); return; }
   const ok = await confirmDialog(
     "重做这个文件夹",
-    `将清掉 ${s.folder}/winners 与 /losers 子目录、所有缓存与本次进度，` +
+    `将清掉 ${s.folder}/winners、/losers 与 /review 子目录、所有缓存与本次进度，` +
     `用同样的设置（${s.mode === "move" ? "移动" : "复制"}模式` +
     `${s.dry_run ? "、试运行" : ""}）重新分组挑选。\n\n这步不可撤销，确定继续？`
   );
@@ -2473,6 +2531,9 @@ $("btn-redo-folder").addEventListener("click", async () => {
         near_seconds: s.near_seconds,
         prescreen_enabled: s.prescreen_enabled,
         prescreen_strength: s.prescreen_strength,
+        skip_duplicate_selection: s.skip_duplicate_selection,
+        record_preferences: s.record_preferences,
+        scene_label: s.scene_label || "",
         llm_model: s.llm_model || localStorage.getItem("pic_selecter.llm_model") || "",
       }),
     });
@@ -2518,6 +2579,7 @@ async function reopenGroup(groupId, groupSize, btn) {
 // =================================================================
 let lbItem = null;
 function openLightbox(item) {
+  rememberDoneScroll();
   lbItem = item;
   $("lb-img").src = imgUrl(item.path);
   $("lb-caption").textContent = item.name || basename(item.path);
@@ -2526,6 +2588,7 @@ function openLightbox(item) {
 function closeLightbox() {
   $("lightbox").classList.add("hidden");
   $("lb-img").removeAttribute("src");
+  restoreDoneScroll();
 }
 $("lb-close").addEventListener("click", closeLightbox);
 $("lightbox").addEventListener("click", (e) => {
