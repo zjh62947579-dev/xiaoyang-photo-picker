@@ -9,6 +9,8 @@ authors = [
   { name = "Pianke contributors" },
 ]
 dependencies = [
+  "packaging>=23",
+  "setuptools<81",
   "Pillow>=10.0",
   "imagehash>=4.3",
   "flask>=3.0",

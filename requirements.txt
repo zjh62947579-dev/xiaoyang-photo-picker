@@ -27,6 +27,8 @@
 # 一键启动器（scripts/launcher.py）会自动做这件事，手动模式需要自己做。
 
 Pillow>=10.0
+packaging>=23
+setuptools<81
 imagehash>=4.3
 flask>=3.0
 pillow-heif>=0.16

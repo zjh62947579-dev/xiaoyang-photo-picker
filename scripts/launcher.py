@@ -82,6 +82,8 @@ TORCH_CUDA_PACKAGES = [
 # 不能塞进 MODE_PACKAGES["fast"]——否则"只选 expert"的用户会缺 Pillow/flask/...
 # 应用根本起不来。
 CORE_PACKAGES = [
+    "packaging>=23",
+    "setuptools<81",
     "Pillow>=10.0",
     "pillow-heif>=0.16",
     "numpy>=1.26",
@@ -505,6 +507,64 @@ def _ensure_opencv_single() -> None:
     info("OpenCV 已修复（只保留 contrib 版） ✓")
 
 
+def _venv_purelib() -> Path | None:
+    if not PY_IN_VENV.exists():
+        return None
+    try:
+        out = subprocess.check_output(
+            [str(PY_IN_VENV), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return Path(out) if out else None
+    except Exception:
+        return None
+
+
+def _pkg_resources_packaging_ok() -> bool:
+    if not PY_IN_VENV.exists():
+        return False
+    rc = subprocess.run(
+        [str(PY_IN_VENV), "-c", "from pkg_resources import packaging; print(packaging.__name__)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return rc.returncode == 0
+
+
+def _ensure_pkg_resources_packaging_compat() -> None:
+    """兼容旧依赖的 `from pkg_resources import packaging` 写法。
+
+    setuptools/pkg_resources 版本变化后，Windows 用户可能在 expert 模式启动时遇到：
+    cannot import name 'packaging' from 'pkg_resources'
+    写入一个 venv 内的轻量启动补丁，比要求用户手动处理依赖更稳。
+    """
+    if _pkg_resources_packaging_ok():
+        return
+    purelib = _venv_purelib()
+    if not purelib:
+        warn("无法定位 site-packages，跳过 pkg_resources 兼容补丁")
+        return
+    purelib.mkdir(parents=True, exist_ok=True)
+    compat_py = purelib / "pianke_pkg_resources_compat.py"
+    compat_pth = purelib / "pianke_pkg_resources_compat.pth"
+    compat_py.write_text(
+        "try:\n"
+        "    import packaging as _packaging\n"
+        "    import pkg_resources as _pkg_resources\n"
+        "    if not hasattr(_pkg_resources, 'packaging'):\n"
+        "        _pkg_resources.packaging = _packaging\n"
+        "except Exception:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    compat_pth.write_text("import pianke_pkg_resources_compat\n", encoding="utf-8")
+    if _pkg_resources_packaging_ok():
+        info("已修复 pkg_resources / packaging 兼容性 ✓")
+    else:
+        warn("pkg_resources / packaging 兼容性仍异常，后续如失败请删除 .venv 后重试")
+
+
 def packages_for_modes(modes: list[str]) -> list[str]:
     """返回 CORE + 选中模式的额外包。任何模式都会带上 CORE。"""
     seen: dict[str, None] = {pkg: None for pkg in CORE_PACKAGES}
@@ -576,6 +636,7 @@ def ensure_dependencies(modes: list[str], install: dict, force: bool) -> None:
     sig = "|".join(sorted(packages + [backend_sig]))
     last_sig = install.get("packages_sig")
     if not force and last_sig == sig and PY_IN_VENV.exists():
+        _ensure_pkg_resources_packaging_compat()
         info("依赖已是最新，跳过安装")
         return
 
@@ -583,6 +644,7 @@ def ensure_dependencies(modes: list[str], install: dict, force: bool) -> None:
     info(f"准备安装 {len(packages)} 个 pip 包，预计耗时：{est}")
     runtime_backend = ensure_runtime_backends(modes, runtime)
     pip_install(packages)
+    _ensure_pkg_resources_packaging_compat()
     install["packages_sig"] = sig
     install["modes"] = modes
     install["runtime_backend"] = runtime_backend
