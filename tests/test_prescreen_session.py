@@ -434,3 +434,67 @@ def test_training_export_contains_anonymized_jsonl_files(tmp_path):
     assert meta["scene_label"] == "亲子"
     assert meta["contains_images"] is False
     assert str(tmp_path) not in combined
+
+
+def test_resume_restores_saved_session_and_meta(tmp_path):
+    app = import_app_module()
+    one = make_info(tmp_path / "one.jpg", score=80, face_count=2)
+    two = make_info(tmp_path / "two.jpg", score=75, face_count=0)
+    sess = app.build_session_from_groups(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        raw_groups=[[one, two]],
+        infos=[one, two],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=False,
+        prescreen_strength="standard",
+        scene_label="活动",
+    )
+    assert (app.state_path(str(tmp_path))).exists()
+    app.SESSION = None
+    app.LAST_INFOS = None
+
+    client = app.app.test_client()
+    resp = client.post(
+        "/api/resume",
+        json={"folder": str(tmp_path)},
+        headers=LOCAL_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["resumed"] is True
+    assert app.SESSION is not None
+    assert app.SESSION.scene_label == "活动"
+    assert app.SESSION.meta[one.path]["face_count"] == 2
+    assert app.SESSION.groups[0].left == sess.groups[0].left
+
+
+def test_start_requires_explicit_force_restart_when_prior_state_exists(tmp_path):
+    app = import_app_module()
+    one = make_info(tmp_path / "one.jpg", score=80)
+    app.build_keep_all_session_from_infos(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        infos=[one],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=False,
+        prescreen_strength="standard",
+        engine="fast",
+    )
+
+    client = app.app.test_client()
+    resp = client.post(
+        "/api/start",
+        json={"folder": str(tmp_path), "engine": "fast"},
+        headers=LOCAL_HEADERS,
+    )
+
+    assert resp.status_code == 409
+    assert resp.get_json()["has_prior"] is True

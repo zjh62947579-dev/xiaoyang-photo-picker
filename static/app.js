@@ -529,9 +529,11 @@ restoreRuntimeChoice();
 // ---------- 文件夹快照（路径选好的瞬间触发） ----------
 let peekTimer = null;
 let peekToken = 0;
+let lastPeek = null;
 function requestFolderPeek(folder) {
   clearTimeout(peekTimer);
   if (!folder || folder.length < 2) {
+    lastPeek = null;
     $("folder-snapshot").classList.add("hidden");
     setStatus("引擎就绪", "idle");
     return;
@@ -554,10 +556,12 @@ async function doFolderPeek(folder) {
   }
   if (myToken !== peekToken) return;
   if (!r.ok || !r.count) {
+    lastPeek = r;
     $("folder-snapshot").classList.add("hidden");
     setStatus(r.error || "未在该目录找到照片", "idle");
     return;
   }
+  lastPeek = r;
   $("snap-count").textContent = r.count.toLocaleString();
   const period = r.latest ? `${r.earliest} – ${r.latest}` : r.earliest;
   $("snap-period").textContent = period;
@@ -565,7 +569,20 @@ async function doFolderPeek(folder) {
     ? `主要在 ${r.active_period} 拍摄`
     : "";
   $("snap-size").textContent = r.size_text;
-  $("snap-resume").textContent = r.span_days > 1 ? `跨 ${r.span_days} 天` : "";
+  $("snap-resume").textContent = r.has_prior
+    ? "发现旧进度"
+    : (r.span_days > 1 ? `跨 ${r.span_days} 天` : "");
+  const resumeActions = $("resume-actions");
+  resumeActions.classList.toggle("hidden", !r.has_prior);
+  if (r.has_prior) {
+    const summary = r.state_summary
+      ? `已完成 ${r.state_summary.finished_groups || 0} / ${r.state_summary.total_groups || 0} 组。`
+      : "发现 winners/losers/review 结果目录。";
+    $("resume-summary").textContent = r.can_resume
+      ? `${summary} 可以继续上次筛选，或清掉结果重新开始。`
+      : `${summary} 未找到可恢复进度，只能重新开始。`;
+    $("btn-resume-session").disabled = !r.can_resume;
+  }
   const sw = $("snap-samples");
   sw.innerHTML = "";
   (r.samples || []).slice(0, 3).forEach((p) => {
@@ -606,8 +623,9 @@ dropZone.addEventListener("drop", (e) => {
   }
 });
 
-async function handleStart(e) {
+async function handleStart(e, options = {}) {
   if (e && e.preventDefault) e.preventDefault();
+  const force_restart = !!options.forceRestart;
   const folder = $("folder-input").value.trim();
   const dry_run = false;  // 试运行入口已下线；后端仍兼容此参数
   // 一次性运行：每次 start 后端都会清掉 winners/losers/state，不再需要这个选项
@@ -627,6 +645,11 @@ async function handleStart(e) {
   const near_seconds = parseInt($("thr-near-secs").value) * 60;
   $("start-error").textContent = "";
   if (!folder) { $("start-error").textContent = "请填写文件夹路径"; return; }
+  if (!force_restart && lastPeek?.has_prior) {
+    $("start-error").textContent = "发现旧进度，请选择“继续上次”或“重新开始”。";
+    setStatus("等待选择继续或重新开始", "waiting");
+    return;
+  }
 
   if (mode === "move" && !dry_run && !localStorage.getItem(CONFIRM_MOVE_KEY)) {
     const ok = await confirmDialog(
@@ -658,6 +681,7 @@ async function handleStart(e) {
       method: "POST",
       body: JSON.stringify({
         folder, dry_run, wipe_cache, mode, engine, runtime,
+        force_restart,
         threshold_near, threshold_far, near_seconds,
         prescreen_enabled, prescreen_strength, skip_duplicate_selection,
         record_preferences, scene_label, face_aware,
@@ -680,6 +704,36 @@ async function handleStart(e) {
 
 $("start-btn").addEventListener("click", handleStart);
 $("start-form").addEventListener("submit", handleStart);
+
+async function resumeSession() {
+  const folder = $("folder-input").value.trim();
+  if (!folder) { $("start-error").textContent = "请填写文件夹路径"; return; }
+  $("start-btn").disabled = true;
+  $("btn-resume-session").disabled = true;
+  try {
+    await fetchJSON("/api/resume", {
+      method: "POST",
+      body: JSON.stringify({ folder }),
+    });
+    pushRecent(folder);
+    await bootstrap();
+  } catch (err) {
+    $("start-error").textContent = err.message;
+    setStatus("恢复失败", "error");
+    $("start-btn").disabled = false;
+    $("btn-resume-session").disabled = false;
+  }
+}
+
+$("btn-resume-session").addEventListener("click", resumeSession);
+$("btn-force-restart").addEventListener("click", async () => {
+  const ok = await confirmDialog(
+    "重新开始",
+    "这会清掉旧进度和 winners/losers/review 输出目录后重新处理。确定继续？"
+  );
+  if (!ok) return;
+  handleStart(null, { forceRestart: true });
+});
 
 $("browse-btn").addEventListener("click", async () => {
   const btn = $("browse-btn");
@@ -2328,9 +2382,14 @@ async function renderWinnersAlbum(options = {}) {
         ? `从 ${item.group_size} 张里` : "独张";
       cell.innerHTML = `
         <img loading="lazy" src="${imgUrl(item.path, 480)}" alt="${item.name}">
-        <span class="album-badge">${badgeText}</span>`;
+        <span class="album-badge">${badgeText}</span>
+        <button type="button" class="album-reopen-btn">${item.group_size > 1 ? "重选这组" : "重选"}</button>`;
       cell.title = `${item.name} · ${badgeText}`;
       cell.addEventListener("click", () => openLightbox(item));
+      cell.querySelector(".album-reopen-btn").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        reopenGroup(item.group_id, item.group_size, ev.currentTarget);
+      });
       row.appendChild(cell);
     });
     album.appendChild(row);
@@ -2521,6 +2580,7 @@ $("btn-redo-folder").addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({
         folder: s.folder,
+        force_restart: true,
         dry_run: !!s.dry_run,
         wipe_cache: true,
         mode: s.mode || "copy",

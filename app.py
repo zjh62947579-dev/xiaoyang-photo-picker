@@ -485,6 +485,7 @@ def save_state(state: SessionState) -> None:
         "prescreen_rejected": state.prescreen_rejected,
         "prescreen_reject_reasons": state.prescreen_reject_reasons,
         "prescreen_restored": state.prescreen_restored,
+        "meta": state.meta,
         "companions": state.companions,
         "groups": [asdict(g) for g in state.groups],
     }
@@ -562,7 +563,7 @@ def load_state(folder: str) -> Optional[SessionState]:
             prescreen_reject_reasons=data.get("prescreen_reject_reasons", {}),
             prescreen_restored=data.get("prescreen_restored", []),
             undo_stack=[],
-            meta={},
+            meta=data.get("meta", {}),
             companions=data.get("companions", {}),
         )
         return sess
@@ -2619,6 +2620,7 @@ def api_start():
     global JOB, SESSION
     data = request.get_json(force=True)
     folder = (data.get("folder") or "").strip()
+    force_restart = bool(data.get("force_restart", False))
     runtime = _normalize_runtime(data.get("runtime"))
     dry_run = bool(data.get("dry_run", False))
     wipe_cache = bool(data.get("wipe_cache", False))
@@ -2650,6 +2652,12 @@ def api_start():
     folder = str(Path(folder).expanduser().resolve())
     if not Path(folder).is_dir():
         return jsonify({"error": f"目录不存在: {folder}"}), 400
+    has_previous = state_path(folder).exists() or (Path(folder) / "winners").exists() or (Path(folder) / "losers").exists()
+    if has_previous and not force_restart:
+        return jsonify({
+            "error": "发现旧进度或结果，请选择“继续上次”或“重新开始”。",
+            "has_prior": True,
+        }), 409
     if engine == "tycoon" and not llm_model:
         return jsonify({"error": "土豪模式需要选择 LLM 模型"}), 400
     if engine == "fast":
@@ -2696,6 +2704,31 @@ def api_start():
     )
     t.start()
     return jsonify({"ok": True})
+
+
+@app.route("/api/resume", methods=["POST"])
+def api_resume():
+    global SESSION, LAST_INFOS
+    data = request.get_json(force=True) or {}
+    folder = (data.get("folder") or "").strip()
+    if not folder:
+        return jsonify({"error": "请填写文件夹路径"}), 400
+    folder = str(Path(folder).expanduser().resolve())
+    if not Path(folder).is_dir():
+        return jsonify({"error": f"目录不存在: {folder}"}), 400
+    sess = load_state(folder)
+    if sess is None:
+        return jsonify({"error": "没有找到可继续的进度"}), 404
+    setup_logger(folder)
+    with LOCK:
+        SESSION = sess
+        LAST_INFOS = None
+    return jsonify({
+        "ok": True,
+        "resumed": True,
+        "total_groups": len(sess.groups),
+        "finished_groups": sum(1 for g in sess.groups if g.finished),
+    })
 
 
 @app.route("/api/reset_session", methods=["POST"])
@@ -4092,7 +4125,22 @@ def api_peek_folder():
     if earliest and latest and latest > earliest:
         span_days = max(1, int((latest - earliest) / 86400) + 1)
 
-    has_prior = (p / "winners").is_dir() or (p / "losers").is_dir() or state_path(folder).exists()
+    state_exists = state_path(folder).exists()
+    has_prior = (p / "winners").is_dir() or (p / "losers").is_dir() or (p / "review").is_dir() or state_exists
+    state_summary = None
+    if state_exists:
+        try:
+            state_data = json.loads(state_path(folder).read_text(encoding="utf-8"))
+            groups = state_data.get("groups", [])
+            finished = sum(1 for g in groups if g.get("finished"))
+            state_summary = {
+                "total_groups": len(groups),
+                "finished_groups": finished,
+                "mode": state_data.get("mode", "copy"),
+                "engine": state_data.get("engine", "fast"),
+            }
+        except Exception:
+            state_summary = None
 
     return jsonify({
         "ok": True,
@@ -4104,6 +4152,8 @@ def api_peek_folder():
         "active_period": _half_day_label(),
         "samples": samples_landscape[:3],
         "has_prior": has_prior,
+        "can_resume": state_exists,
+        "state_summary": state_summary,
     })
 
 

@@ -2208,6 +2208,28 @@ body:has(#view-done.active) .status-badge {
 @keyframes snap-thumb {
   to { opacity: 1; transform: translateY(0); }
 }
+.resume-actions {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line-soft);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.resume-actions.hidden { display: none; }
+.resume-actions strong {
+  display: block;
+  color: var(--accent-deep);
+  margin-bottom: 3px;
+}
+.resume-buttons {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
 .adv-deep {
   margin-top: 8px;
   padding-top: 10px;
@@ -2523,6 +2545,30 @@ body:has(#view-done.active) .status-badge {
   font-size: 10px;
   letter-spacing: 0.04em;
   font-family: var(--font-mono);
+}
+.album-reopen-btn {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  border: 1px solid rgba(255,255,255,0.28);
+  border-radius: 999px;
+  background: rgba(20, 17, 13, 0.58);
+  color: rgba(255,255,255,0.92);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity .18s var(--ease), transform .18s var(--ease), background .18s var(--ease);
+}
+.album-cell:hover .album-reopen-btn,
+.album-reopen-btn:focus-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.album-reopen-btn:hover {
+  background: rgba(20, 17, 13, 0.78);
 }
 @keyframes album-in {
   to { opacity: 1; }
