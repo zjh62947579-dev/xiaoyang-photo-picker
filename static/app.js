@@ -1,6 +1,16 @@
 /* 小羊帮你筛照片 — 前端逻辑 v3.2 (照片墙)，基于片刻 */
 
 const $ = (id) => document.getElementById(id);
+function setText(id, value) {
+  const el = $(id);
+  if (el) el.textContent = value ?? "";
+}
+function clearStartError() {
+  setText("start-error", "");
+}
+function showStartError(message) {
+  setText("start-error", message || "发生未知错误");
+}
 const VIEWS = ["landing", "processing", "prescreen", "preview", "arena", "done"];
 const RECENT_KEY = "pic-arena.recent-folders";
 const TUTORIAL_KEY = "pic-arena.tutorial-seen";
@@ -33,7 +43,7 @@ function setStatus(label, state = "idle") {
   // state: idle / busy / waiting / done / error
   const badge = $("status-badge");
   if (!badge) return;
-  $("status-text").textContent = label;
+  setText("status-text", label);
   badge.classList.remove("is-busy", "is-waiting", "is-done", "is-error");
   if (state !== "idle") badge.classList.add(`is-${state}`);
 }
@@ -42,7 +52,10 @@ function setStatus(label, state = "idle") {
 // 视图切换 + title + history
 // =================================================================
 function showView(name, push = true) {
-  for (const v of VIEWS) $(`view-${v}`).classList.toggle("active", v === name);
+  for (const v of VIEWS) {
+    const el = $(`view-${v}`);
+    if (el) el.classList.toggle("active", v === name);
+  }
   updateTitle(name);
   document.body.dataset.view = name;
   // 每次回到 landing 都把"开始"按钮复位——之前 handleStart 把它 disabled 后没复位，
@@ -50,8 +63,7 @@ function showView(name, push = true) {
   if (name === "landing") {
     const startBtn = document.getElementById("start-btn");
     if (startBtn) startBtn.disabled = false;
-    const errEl = document.getElementById("start-error");
-    if (errEl) errEl.textContent = "";
+    clearStartError();
   }
   if (push && history.state?.view !== name) {
     history.pushState({ view: name }, "", location.pathname);
@@ -227,6 +239,7 @@ function pushRecent(path) {
 }
 function renderRecent() {
   const wrap = $("recent-folders");
+  if (!wrap) return;
   const rs = loadRecent();
   wrap.innerHTML = "";
   if (!rs.length) return;
@@ -534,7 +547,7 @@ function requestFolderPeek(folder) {
   clearTimeout(peekTimer);
   if (!folder || folder.length < 2) {
     lastPeek = null;
-    $("folder-snapshot").classList.add("hidden");
+    $("folder-snapshot")?.classList.add("hidden");
     setStatus("引擎就绪", "idle");
     return;
   }
@@ -557,42 +570,45 @@ async function doFolderPeek(folder) {
   if (myToken !== peekToken) return;
   if (!r.ok || !r.count) {
     lastPeek = r;
-    $("folder-snapshot").classList.add("hidden");
+    $("folder-snapshot")?.classList.add("hidden");
     setStatus(r.error || "未在该目录找到照片", "idle");
     return;
   }
   lastPeek = r;
-  $("snap-count").textContent = r.count.toLocaleString();
+  setText("snap-count", r.count.toLocaleString());
   const period = r.latest ? `${r.earliest} – ${r.latest}` : r.earliest;
-  $("snap-period").textContent = period;
-  $("snap-active").textContent = r.active_period
+  setText("snap-period", period);
+  setText("snap-active", r.active_period
     ? `主要在 ${r.active_period} 拍摄`
-    : "";
-  $("snap-size").textContent = r.size_text;
-  $("snap-resume").textContent = r.has_prior
+    : "");
+  setText("snap-size", r.size_text);
+  setText("snap-resume", r.has_prior
     ? "发现旧进度"
-    : (r.span_days > 1 ? `跨 ${r.span_days} 天` : "");
+    : (r.span_days > 1 ? `跨 ${r.span_days} 天` : ""));
   const resumeActions = $("resume-actions");
-  resumeActions.classList.toggle("hidden", !r.has_prior);
+  resumeActions?.classList.toggle("hidden", !r.has_prior);
   if (r.has_prior) {
     const summary = r.state_summary
       ? `已完成 ${r.state_summary.finished_groups || 0} / ${r.state_summary.total_groups || 0} 组。`
       : "发现 winners/losers/review 结果目录。";
-    $("resume-summary").textContent = r.can_resume
+    setText("resume-summary", r.can_resume
       ? `${summary} 可以继续上次筛选，或清掉结果重新开始。`
-      : `${summary} 未找到可恢复进度，只能重新开始。`;
-    $("btn-resume-session").disabled = !r.can_resume;
+      : `${summary} 未找到可恢复进度，只能重新开始。`);
+    const resumeBtn = $("btn-resume-session");
+    if (resumeBtn) resumeBtn.disabled = !r.can_resume;
   }
   const sw = $("snap-samples");
-  sw.innerHTML = "";
-  (r.samples || []).slice(0, 3).forEach((p) => {
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.src = imgUrl(p, 220);
-    sw.appendChild(img);
-  });
-  sw.style.display = r.samples?.length ? "" : "none";
-  $("folder-snapshot").classList.remove("hidden");
+  if (sw) {
+    sw.innerHTML = "";
+    (r.samples || []).slice(0, 3).forEach((p) => {
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.src = imgUrl(p, 220);
+      sw.appendChild(img);
+    });
+    sw.style.display = r.samples?.length ? "" : "none";
+  }
+  $("folder-snapshot")?.classList.remove("hidden");
   setStatus(`已读取 ${r.count.toLocaleString()} 张 · 待处理`, "idle");
 }
 
@@ -643,10 +659,10 @@ async function handleStart(e, options = {}) {
   const threshold_near = parseInt($("thr-near").value);
   const threshold_far = parseInt($("thr-far").value);
   const near_seconds = parseInt($("thr-near-secs").value) * 60;
-  $("start-error").textContent = "";
-  if (!folder) { $("start-error").textContent = "请填写文件夹路径"; return; }
+  clearStartError();
+  if (!folder) { showStartError("请填写文件夹路径"); return; }
   if (!force_restart && lastPeek?.has_prior) {
-    $("start-error").textContent = "发现旧进度，请选择“继续上次”或“重新开始”。";
+    showStartError("发现旧进度，请选择“继续上次”或“重新开始”。");
     setStatus("等待选择继续或重新开始", "waiting");
     return;
   }
@@ -696,7 +712,7 @@ async function handleStart(e, options = {}) {
       enterProcessing(folder);
     }
   } catch (err) {
-    $("start-error").textContent = err.message;
+    showStartError(err.message);
     $("start-btn").disabled = false;
     setStatus("启动失败", "error");
   }
@@ -707,7 +723,7 @@ $("start-form").addEventListener("submit", handleStart);
 
 async function resumeSession() {
   const folder = $("folder-input").value.trim();
-  if (!folder) { $("start-error").textContent = "请填写文件夹路径"; return; }
+  if (!folder) { showStartError("请填写文件夹路径"); return; }
   $("start-btn").disabled = true;
   $("btn-resume-session").disabled = true;
   try {
@@ -718,7 +734,7 @@ async function resumeSession() {
     pushRecent(folder);
     await bootstrap();
   } catch (err) {
-    $("start-error").textContent = err.message;
+    showStartError(err.message);
     setStatus("恢复失败", "error");
     $("start-btn").disabled = false;
     $("btn-resume-session").disabled = false;
@@ -743,7 +759,7 @@ $("browse-btn").addEventListener("click", async () => {
     if (r.cancelled) return;
     if (r.folder) {
       $("folder-input").value = r.folder;
-      $("start-error").textContent = "";
+      clearStartError();
       requestFolderPeek(r.folder);
     }
   } catch (e) {
