@@ -30,8 +30,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-GITHUB_OWNER = "zhaoyue4810"
-GITHUB_REPO = "pianke"
+GITHUB_OWNER = "zjh62947579-dev"
+GITHUB_REPO = "xiaoyang-photo-picker"
 GITHUB_BRANCH = "main"
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -565,6 +565,88 @@ def _ensure_pkg_resources_packaging_compat() -> None:
         warn("pkg_resources / packaging 兼容性仍异常，后续如失败请删除 .venv 后重试")
 
 
+def _verify_imports(imports: list[tuple[str, str]]) -> tuple[bool, str]:
+    code = (
+        "import importlib, sys\n"
+        f"mods = {json.dumps(imports, ensure_ascii=False)}\n"
+        "for mod, label in mods:\n"
+        "    try:\n"
+        "        importlib.import_module(mod)\n"
+        "    except Exception as e:\n"
+        "        print(f'{label}: {type(e).__name__}: {e}')\n"
+        "        sys.exit(1)\n"
+    )
+    rc = subprocess.run(
+        [str(PY_IN_VENV), "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    if rc.returncode == 0:
+        return True, ""
+    detail = (rc.stdout or rc.stderr or "未知错误").strip()
+    return False, detail
+
+
+def verify_environment(modes: list[str]) -> None:
+    """启动前做一次依赖冒烟检查，尽早发现 Windows wheel / 镜像 / 版本问题。"""
+    core_imports = [
+        ("flask", "Flask"),
+        ("PIL", "Pillow"),
+        ("numpy", "NumPy"),
+        ("scipy", "SciPy"),
+        ("cv2", "OpenCV"),
+        ("imagehash", "imagehash"),
+        ("rawpy", "rawpy"),
+        ("piexif", "piexif"),
+        ("packaging", "packaging"),
+        ("pkg_resources", "setuptools/pkg_resources"),
+    ]
+    ok, detail = _verify_imports(core_imports)
+    if not ok:
+        die(
+            "基础依赖自检失败：\n"
+            f"  {detail}\n\n"
+            "建议删除项目里的 .venv 文件夹后重新启动；如果仍失败，把这段错误截图发给维护者。"
+        )
+
+    if any(m in {"expert", "tycoon"} for m in modes):
+        _ensure_pkg_resources_packaging_compat()
+        vision_imports = [
+            ("torch", "PyTorch"),
+            ("torchvision", "torchvision"),
+            ("transformers", "transformers"),
+            ("onnxruntime", "onnxruntime"),
+            ("insightface", "InsightFace"),
+        ]
+        ok, detail = _verify_imports(vision_imports)
+        if not ok:
+            die(
+                "视觉依赖自检失败：\n"
+                f"  {detail}\n\n"
+                "常见原因是 Windows 依赖 wheel 下载不完整或版本冲突。"
+                "请先删除项目里的 .venv 文件夹，再重新双击启动器。"
+            )
+
+    if "expert" in modes:
+        ok, detail = _verify_imports([("pyiqa", "pyiqa"), ("timm", "timm")])
+        if not ok:
+            die(
+                "专家模式依赖自检失败：\n"
+                f"  {detail}\n\n"
+                "请删除项目里的 .venv 文件夹后重新启动；如果仍失败，把这段错误截图发给维护者。"
+            )
+
+    if "tycoon" in modes:
+        ok, detail = _verify_imports([("openai", "OpenAI SDK")])
+        if not ok:
+            die(
+                "土豪模式依赖自检失败：\n"
+                f"  {detail}\n\n"
+                "请删除项目里的 .venv 文件夹后重新启动。"
+            )
+    info("依赖自检通过 ✓")
+
+
 def packages_for_modes(modes: list[str]) -> list[str]:
     """返回 CORE + 选中模式的额外包。任何模式都会带上 CORE。"""
     seen: dict[str, None] = {pkg: None for pkg in CORE_PACKAGES}
@@ -717,6 +799,7 @@ def main() -> int:
     step(3, 4, "准备 Python 虚拟环境与依赖")
     ensure_venv()
     ensure_dependencies(modes, install, force=False)
+    verify_environment(modes)
 
     # 步骤 4：启动
     step(4, 4, "启动应用")

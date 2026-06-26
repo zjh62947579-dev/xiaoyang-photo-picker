@@ -43,12 +43,9 @@ opencv-contrib-python>=4.9
 rawpy>=0.18
 
 # 视觉语义特征（DINOv2）+ NIMA 美学评分（MobileNetV2）
-# Windows + Python 3.11 直接锁定官方 CUDA 12.8 wheel，避免 pip 从 PyPI
-# 选到更高版本的 CPU 版 torch。
-https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp311-cp311-win_amd64.whl ; platform_system == "Windows" and python_version == "3.11"
-https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp311-cp311-win_amd64.whl ; platform_system == "Windows" and python_version == "3.11"
-torch>=2.2 ; platform_system != "Windows" or python_version != "3.11"
-torchvision>=0.17 ; platform_system != "Windows" or python_version != "3.11"
+# 一键启动器会按设备自动选择 CPU / CUDA 源；手动安装先装通用版本。
+torch>=2.2
+torchvision>=0.17
 transformers>=4.40
 
 # 人脸检测 + ArcFace 512 维嵌入（RetinaFace + ArcFace via InsightFace）
