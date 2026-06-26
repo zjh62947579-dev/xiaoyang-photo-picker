@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import threading
+import zipfile
 from pathlib import Path
 from typing import List, Tuple
 
@@ -139,6 +140,10 @@ def _torch_home() -> Path:
 
 def _insightface_root() -> Path:
     return _cache_dir() / "insightface"
+
+
+def _insightface_model_dir(name: str = "buffalo_l") -> Path:
+    return _insightface_root() / "models" / name
 
 
 def _hf_model_dir(model_id: str) -> Path:
@@ -263,6 +268,126 @@ def _ensure_model_storage_configured() -> None:
         _migrate_legacy_model_caches()
         _MODEL_STORAGE_READY = True
         logger.info("vision: 模型目录已固定到 %s", models_root)
+
+
+def _insightface_model_ready(name: str = "buffalo_l") -> bool:
+    model_dir = _insightface_model_dir(name)
+    return model_dir.exists() and any(model_dir.glob("*.onnx"))
+
+
+def _insightface_model_urls(name: str = "buffalo_l") -> list[str]:
+    official = f"https://github.com/deepinsight/insightface/releases/download/v0.7/{name}.zip"
+    urls = []
+    custom = os.environ.get("PIC_SELECTER_INSIGHTFACE_MODEL_URL", "").strip()
+    if custom:
+        urls.append(custom)
+    urls.append(official)
+    # GitHub 在部分 Windows / 企业网络里容易证书链失败，保留几个只用于模型 zip 的镜像兜底。
+    urls.extend([
+        f"https://mirror.ghproxy.com/{official}",
+        f"https://gh-proxy.com/{official}",
+        f"https://github.moeyy.xyz/{official}",
+    ])
+    out = []
+    seen = set()
+    for url in urls:
+        if url and url not in seen:
+            out.append(url)
+            seen.add(url)
+    return out
+
+
+def _download_file(url: str, dest: Path, *, verify: bool = True) -> None:
+    import requests
+    try:
+        import certifi
+        verify_arg = certifi.where() if verify else False
+    except Exception:
+        verify_arg = verify
+
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.unlink(missing_ok=True)
+    with requests.get(url, stream=True, timeout=(10, 120), verify=verify_arg) as resp:
+        resp.raise_for_status()
+        with tmp.open("wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+    tmp.replace(dest)
+
+
+def _extract_insightface_zip(zip_path: Path, name: str = "buffalo_l") -> None:
+    model_dir = _insightface_model_dir(name)
+    tmp_dir = model_dir.with_name(model_dir.name + "_tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmp_dir)
+        onnx_files = list(tmp_dir.glob("*.onnx"))
+        if not onnx_files:
+            nested = tmp_dir / name
+            if nested.exists():
+                onnx_files = list(nested.glob("*.onnx"))
+                if onnx_files:
+                    shutil.rmtree(model_dir, ignore_errors=True)
+                    nested.replace(model_dir)
+                    return
+        if not onnx_files:
+            raise VisionUnavailable("InsightFace 模型包解压后未找到 .onnx 文件。")
+        shutil.rmtree(model_dir, ignore_errors=True)
+        model_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp_dir.replace(model_dir)
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _ensure_insightface_model_files(name: str = "buffalo_l") -> None:
+    if _insightface_model_ready(name):
+        return
+    _ensure_model_storage_configured()
+    zip_path = _insightface_root() / "models" / f"{name}.zip"
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+
+    errors: list[str] = []
+    ssl_failed = False
+    for url in _insightface_model_urls(name):
+        try:
+            logger.info("vision: 下载 InsightFace 模型 %s", url)
+            _download_file(url, zip_path, verify=True)
+            _extract_insightface_zip(zip_path, name)
+            if _insightface_model_ready(name):
+                logger.info("vision: InsightFace 模型已准备：%s", _insightface_model_dir(name))
+                return
+        except Exception as e:
+            msg = f"{url}: {type(e).__name__}: {e}"
+            errors.append(msg)
+            if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSLCertVerificationError" in str(e):
+                ssl_failed = True
+            logger.warning("vision: InsightFace 模型下载失败：%s", msg)
+
+    if ssl_failed:
+        official = f"https://github.com/deepinsight/insightface/releases/download/v0.7/{name}.zip"
+        try:
+            logger.warning("vision: 证书校验失败，尝试不校验证书下载官方模型包")
+            _download_file(official, zip_path, verify=False)
+            _extract_insightface_zip(zip_path, name)
+            if _insightface_model_ready(name):
+                logger.info("vision: InsightFace 模型已通过证书兜底下载完成")
+                return
+        except Exception as e:
+            errors.append(f"insecure fallback: {type(e).__name__}: {e}")
+
+    detail = "\n".join(errors[-5:])
+    raise VisionUnavailable(
+        "InsightFace 人脸模型 buffalo_l 下载失败。\n"
+        "这通常是 Windows 网络/证书拦截导致 GitHub 模型包无法下载。\n"
+        "请更新到最新版后重试；仍失败时，可手动下载 buffalo_l.zip 放到 "
+        f"{zip_path} 后重新启动。\n"
+        f"最近错误：\n{detail}"
+    )
 
 
 def _pyiqa_device():
@@ -555,6 +680,7 @@ def _ensure_insightface():
             ) from e
 
         logger.info("vision: 加载 InsightFace（RetinaFace + ArcFace，首次约 300MB）…")
+        _ensure_insightface_model_files("buffalo_l")
         providers, ctx_id = _prepare_onnxruntime()
         try:
             app = FaceAnalysis(
@@ -704,6 +830,7 @@ def require_expert_capabilities() -> None:
         raise VisionUnavailable(
             f"专家模式缺少依赖：{', '.join(missing)}。请按 requirements.txt 安装完整依赖。"
         )
+    _ensure_insightface_model_files("buffalo_l")
 
 
 def require_tycoon_capabilities() -> None:
@@ -715,6 +842,7 @@ def require_tycoon_capabilities() -> None:
         raise VisionUnavailable(
             f"土豪模式缺少依赖：{', '.join(missing)}。请按 requirements.txt 安装。"
         )
+    _ensure_insightface_model_files("buffalo_l")
 
 
 def require_face_capabilities() -> None:
@@ -724,6 +852,7 @@ def require_face_capabilities() -> None:
         raise VisionUnavailable(
             "按人脸数量分类缺少依赖：InsightFace / onnxruntime。请按 requirements.txt 安装。"
         )
+    _ensure_insightface_model_files("buffalo_l")
 
 
 def prewarm_all() -> None:

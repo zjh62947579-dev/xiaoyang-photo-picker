@@ -29,6 +29,8 @@
 Pillow>=10.0
 packaging>=23
 setuptools<81
+requests>=2.31
+certifi>=2024.2.2
 imagehash>=4.3
 flask>=3.0
 pillow-heif>=0.16

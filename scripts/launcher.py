@@ -84,6 +84,8 @@ TORCH_CUDA_PACKAGES = [
 CORE_PACKAGES = [
     "packaging>=23",
     "setuptools<81",
+    "requests>=2.31",
+    "certifi>=2024.2.2",
     "Pillow>=10.0",
     "pillow-heif>=0.16",
     "numpy>=1.26",
