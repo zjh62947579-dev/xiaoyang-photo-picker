@@ -2,7 +2,7 @@
 
 > **让小羊先帮你筛一轮照片，把最终的审美决定权留给你自己。**
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](#一键启动推荐)
 [![License: Pianke v2](https://img.shields.io/badge/license-Pianke%20v2-cc785c.svg)](LICENSE)
 
@@ -70,7 +70,7 @@
 | **macOS** | `小羊帮你筛照片.command` 或 `启动_macOS.command` | 若提示“身份不明的开发者”：**按住 Control 键**点击脚本 ➔ 选择 **打开** ➔ 弹窗中再次点击 **打开**。 |
 | **Windows** | `启动_Windows.bat` | 若弹出“Windows 已保护你的电脑”：点击 **更多信息** ➔ 选择 **仍要运行**。 |
 
-*注：启动器会自动在项目独立目录下下载并构建 Python 环境，不污染你的系统环境。国内用户默认启用 PyPI 和模型镜像，可以使用环境变量 `PIANKE_NO_MIRROR=1` 禁用镜像走官方源。*
+*注：启动器会自动在项目独立目录下下载并构建 Python 3.11 环境，不污染你的系统环境。国内用户默认启用 PyPI 和模型镜像，可以使用环境变量 `PIANKE_NO_MIRROR=1` 禁用镜像走官方源。*
 
 首次启动说明：
 
@@ -87,11 +87,11 @@
 
 ### 方式二：手动启动（适合开发者）
 
-如果你已安装 Python 环境并希望手动控制：
+如果你已安装 Python 3.11 环境并希望手动控制：
 
 ```bash
 # 1. 创建并激活虚拟环境
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
 # 2. 安装项目依赖（包含所有模式的并集）

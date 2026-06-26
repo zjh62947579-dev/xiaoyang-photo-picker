@@ -65,10 +65,10 @@ if not defined UV (
 
 set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 
-REM ---- 2. run launcher.py via uv (uv will fetch a managed Python if needed) ----
+REM ---- 2. run launcher.py via uv (uv will fetch Python 3.11 if needed) ----
 echo.
 echo Preparing Python environment...
-"%UV%" run --no-project --python ">=3.10" -- python scripts\launcher.py
+"%UV%" run --no-project --python "3.11" -- python scripts\launcher.py
 set "RC=%errorlevel%"
 
 if not "%RC%"=="0" (

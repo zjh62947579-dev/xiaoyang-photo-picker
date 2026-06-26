@@ -13,13 +13,24 @@ REQ="requirements.txt"
 STAMP=".pic_selecter_deps.stamp"
 
 # ---------- 找 python ----------
-if command -v python3 &>/dev/null; then
+if command -v python3.11 &>/dev/null; then
+  PY=python3.11
+elif command -v python3 &>/dev/null; then
   PY=python3
 elif command -v python &>/dev/null; then
   PY=python
 else
-  echo "❌ 未找到 python3 / python。装一个 Python 3.10+ 再试：" >&2
+  echo "❌ 未找到 python3.11 / python3 / python。装一个 Python 3.11 再试：" >&2
   echo "   https://www.python.org/downloads/" >&2
+  exit 1
+fi
+
+if ! "$PY" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)
+PY
+then
+  echo "❌ 当前 Python 不是 3.11。请安装 Python 3.11，或使用 启动_macOS.command / 启动_Windows.bat 自动准备环境。" >&2
   exit 1
 fi
 

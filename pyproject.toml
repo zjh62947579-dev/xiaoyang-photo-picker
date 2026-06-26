@@ -3,7 +3,7 @@ name = "pianke"
 version = "0.1.0"
 description = "Local photo prescreening, grouping, and A/B selection tool."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 license = { file = "LICENSE" }
 authors = [
   { name = "Pianke contributors" },

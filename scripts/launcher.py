@@ -1,7 +1,7 @@
 """片刻 · 启动器（Python 部分）
 
 由 启动_macOS.command / 启动_Windows.bat 调用。
-本脚本只用标准库，可以在任何 Python 3.10+ 下运行。
+本脚本只用标准库，启动器会固定用 Python 3.11 运行。
 
 职责：
 1. 检查 GitHub 是否有新版本，有则拉取覆盖
@@ -40,6 +40,7 @@ INSTALL_INFO = ROOT / ".pic_selecter_install.json"
 
 IS_WIN = os.name == "nt"
 PY_IN_VENV = VENV / ("Scripts" if IS_WIN else "bin") / ("python.exe" if IS_WIN else "python")
+MANAGED_PYTHON = "3.11"
 
 # 国内镜像源（pip / HuggingFace）。设 PIANKE_NO_MIRROR=1 关闭。
 USE_MIRROR = os.environ.get("PIANKE_NO_MIRROR", "0") != "1"
@@ -361,17 +362,48 @@ def have_uv() -> str | None:
     return None
 
 
+def _venv_python_version() -> tuple[int, int, int] | None:
+    if not PY_IN_VENV.exists():
+        return None
+    try:
+        out = subprocess.check_output(
+            [str(PY_IN_VENV), "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        parts = tuple(int(p) for p in out.split(".")[:3])
+        return parts if len(parts) == 3 else None
+    except Exception:
+        return None
+
+
+def _venv_python_supported() -> bool:
+    ver = _venv_python_version()
+    return bool(ver and ver[0] == 3 and ver[1] == 11)
+
+
 def ensure_venv() -> None:
     if PY_IN_VENV.exists():
-        return
+        if _venv_python_supported():
+            return
+        ver = _venv_python_version()
+        label = ".".join(map(str, ver)) if ver else "未知版本"
+        warn(f"检测到 .venv 使用 Python {label}，当前版本固定使用 Python {MANAGED_PYTHON}。")
+        warn("将自动重建虚拟环境，避免 Python 3.14 等新版本缺少依赖包导致安装失败。")
+        shutil.rmtree(VENV, ignore_errors=True)
     info("创建虚拟环境 .venv/（首次约 5-30 秒，需要时会自动下载 Python）...")
     info("看到 'Downloading cpython...' 滚动是正常的，请耐心等待。")
     uv = have_uv()
     if uv:
         # uv 创建 venv 更快，且能自动下载合适版本的 Python
-        subprocess.check_call([uv, "venv", str(VENV), "--python", ">=3.10"])
+        subprocess.check_call([uv, "venv", str(VENV), "--python", MANAGED_PYTHON])
     else:
         # 退化到 stdlib venv
+        if sys.version_info[:2] != (3, 11):
+            raise RuntimeError(
+                f"未找到 uv，且当前 Python 是 {sys.version.split()[0]}。"
+                f"请安装 uv 或 Python {MANAGED_PYTHON} 后重试。"
+            )
         subprocess.check_call([sys.executable, "-m", "venv", str(VENV)])
     info("虚拟环境已就绪")
 
