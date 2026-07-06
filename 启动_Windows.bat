@@ -124,7 +124,9 @@ if not defined UV (
     set "PY_INSTALLER=%LAUNCHER_CACHE%\!PY_INSTALLER_NAME!"
     set "PY_INSTALLER_URL=https://www.python.org/ftp/python/3.11.9/!PY_INSTALLER_NAME!"
     echo        Downloading !PY_INSTALLER_NAME! to !PY_INSTALLER!
-    certutil -urlcache -f "!PY_INSTALLER_URL!" "!PY_INSTALLER!" >nul 2>&1
+    echo        Please wait. Do not close this window while the download is running.
+    if exist "!PY_INSTALLER!" del /f /q "!PY_INSTALLER!" >nul 2>&1
+    certutil -urlcache -split -f "!PY_INSTALLER_URL!" "!PY_INSTALLER!"
     if errorlevel 1 (
       echo        certutil download failed, trying PowerShell fallback...
       powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $env:PY_INSTALLER_URL -OutFile $env:PY_INSTALLER"
