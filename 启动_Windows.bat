@@ -29,6 +29,12 @@ if not defined PY311 (
   python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
   if not errorlevel 1 set "PY311=python"
 )
+if not defined PY311 (
+  if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY311="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
+)
+if not defined PY311 (
+  if exist "%ProgramFiles%\Python311\python.exe" set "PY311="%ProgramFiles%\Python311\python.exe""
+)
 
 if defined PY311 (
   echo.
@@ -66,6 +72,26 @@ if not defined UV (
       if not defined PY311 (
         python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
         if not errorlevel 1 set "PY311=python"
+      )
+      if defined PY311 (
+        echo.
+        echo Python 3.11 installed, starting launcher...
+        !PY311! scripts\launcher.py
+        set "RC=!errorlevel!"
+        goto :finish
+      )
+    )
+    echo.
+    echo [WARN] winget did not finish Python installation.
+    echo        Trying direct per-user Python 3.11 installer from python.org...
+    set "PY_INSTALLER=%TEMP%\python-3.11.9-amd64.exe"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=Join-Path $env:TEMP 'python-3.11.9-amd64.exe'; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile $out"
+    if not errorlevel 1 (
+      start /wait "" "%PY_INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LOCALAPPDATA%\Programs\Python\Python311"
+      if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY311="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
+      if not defined PY311 (
+        py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY311=py -3.11"
       )
       if defined PY311 (
         echo.
