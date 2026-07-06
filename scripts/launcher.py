@@ -131,11 +131,11 @@ def step(idx: int, total: int, text: str) -> None:
 
 
 def info(text: str) -> None:
-    print(f"  • {text}")
+    print(f"  • {text}", flush=True)
 
 
 def warn(text: str) -> None:
-    print(f"  ⚠ {text}")
+    print(f"  ⚠ {text}", flush=True)
 
 
 def die(text: str) -> None:
@@ -570,25 +570,28 @@ def _ensure_pkg_resources_packaging_compat() -> None:
 
 
 def _verify_imports(imports: list[tuple[str, str]]) -> tuple[bool, str]:
-    code = (
-        "import importlib, sys\n"
-        f"mods = {json.dumps(imports, ensure_ascii=False)}\n"
-        "for mod, label in mods:\n"
-        "    try:\n"
-        "        importlib.import_module(mod)\n"
-        "    except Exception as e:\n"
-        "        print(f'{label}: {type(e).__name__}: {e}')\n"
-        "        sys.exit(1)\n"
-    )
-    rc = subprocess.run(
-        [str(PY_IN_VENV), "-c", code],
-        capture_output=True,
-        text=True,
-    )
-    if rc.returncode == 0:
-        return True, ""
-    detail = (rc.stdout or rc.stderr or "未知错误").strip()
-    return False, detail
+    for mod, label in imports:
+        info(f"校验 {label} ...")
+        code = (
+            "import importlib, sys\n"
+            f"mod = {json.dumps(mod, ensure_ascii=False)}\n"
+            f"label = {json.dumps(label, ensure_ascii=False)}\n"
+            "try:\n"
+            "    importlib.import_module(mod)\n"
+            "except Exception as e:\n"
+            "    print(f'{label}: {type(e).__name__}: {e}')\n"
+            "    sys.exit(1)\n"
+        )
+        rc = subprocess.run(
+            [str(PY_IN_VENV), "-c", code],
+            capture_output=True,
+            text=True,
+        )
+        if rc.returncode != 0:
+            detail = (rc.stdout or rc.stderr or "未知错误").strip()
+            return False, detail
+        info(f"{label} 可用 ✓")
+    return True, ""
 
 
 def verify_environment(modes: list[str]) -> None:

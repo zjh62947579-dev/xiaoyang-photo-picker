@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import threading
+import uuid
 import zipfile
 from pathlib import Path
 from typing import List, Tuple
@@ -35,6 +36,7 @@ from PIL import Image
 logger = logging.getLogger("pic_selecter")
 
 _LOCK = threading.Lock()
+_DOWNLOAD_LOCK = threading.Lock()
 _models: dict = {}
 _DEVICE = None
 _MODEL_STORAGE_READY = False
@@ -297,6 +299,19 @@ def _insightface_model_urls(name: str = "buffalo_l") -> list[str]:
     return out
 
 
+def _cleanup_download_temps(dest: Path) -> None:
+    patterns = [
+        dest.with_suffix(dest.suffix + ".tmp").name,
+        f"{dest.name}.*.tmp",
+    ]
+    for pattern in patterns:
+        for path in dest.parent.glob(pattern):
+            try:
+                path.unlink()
+            except OSError as e:
+                logger.debug("vision: 跳过被占用的临时下载文件 %s: %s", path, e)
+
+
 def _download_file(url: str, dest: Path, *, verify: bool = True) -> None:
     import requests
     try:
@@ -305,20 +320,27 @@ def _download_file(url: str, dest: Path, *, verify: bool = True) -> None:
     except Exception:
         verify_arg = verify
 
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    tmp.unlink(missing_ok=True)
-    with requests.get(url, stream=True, timeout=(10, 120), verify=verify_arg) as resp:
-        resp.raise_for_status()
-        with tmp.open("wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-    tmp.replace(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_download_temps(dest)
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with requests.get(url, stream=True, timeout=(10, 120), verify=verify_arg) as resp:
+            resp.raise_for_status()
+            with tmp.open("wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+        tmp.replace(dest)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug("vision: 清理临时下载文件失败 %s: %s", tmp, e)
 
 
 def _extract_insightface_zip(zip_path: Path, name: str = "buffalo_l") -> None:
     model_dir = _insightface_model_dir(name)
-    tmp_dir = model_dir.with_name(model_dir.name + "_tmp")
+    tmp_dir = model_dir.with_name(f"{model_dir.name}_tmp_{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex}")
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -347,38 +369,41 @@ def _extract_insightface_zip(zip_path: Path, name: str = "buffalo_l") -> None:
 def _ensure_insightface_model_files(name: str = "buffalo_l") -> None:
     if _insightface_model_ready(name):
         return
-    _ensure_model_storage_configured()
-    zip_path = _insightface_root() / "models" / f"{name}.zip"
-    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with _DOWNLOAD_LOCK:
+        if _insightface_model_ready(name):
+            return
+        _ensure_model_storage_configured()
+        zip_path = _insightface_root() / "models" / f"{name}.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
 
-    errors: list[str] = []
-    ssl_failed = False
-    for url in _insightface_model_urls(name):
-        try:
-            logger.info("vision: 下载 InsightFace 模型 %s", url)
-            _download_file(url, zip_path, verify=True)
-            _extract_insightface_zip(zip_path, name)
-            if _insightface_model_ready(name):
-                logger.info("vision: InsightFace 模型已准备：%s", _insightface_model_dir(name))
-                return
-        except Exception as e:
-            msg = f"{url}: {type(e).__name__}: {e}"
-            errors.append(msg)
-            if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSLCertVerificationError" in str(e):
-                ssl_failed = True
-            logger.warning("vision: InsightFace 模型下载失败：%s", msg)
+        errors: list[str] = []
+        ssl_failed = False
+        for url in _insightface_model_urls(name):
+            try:
+                logger.info("vision: 下载 InsightFace 模型 %s", url)
+                _download_file(url, zip_path, verify=True)
+                _extract_insightface_zip(zip_path, name)
+                if _insightface_model_ready(name):
+                    logger.info("vision: InsightFace 模型已准备：%s", _insightface_model_dir(name))
+                    return
+            except Exception as e:
+                msg = f"{url}: {type(e).__name__}: {e}"
+                errors.append(msg)
+                if "CERTIFICATE_VERIFY_FAILED" in str(e) or "SSLCertVerificationError" in str(e):
+                    ssl_failed = True
+                logger.warning("vision: InsightFace 模型下载失败：%s", msg)
 
-    if ssl_failed:
-        official = f"https://github.com/deepinsight/insightface/releases/download/v0.7/{name}.zip"
-        try:
-            logger.warning("vision: 证书校验失败，尝试不校验证书下载官方模型包")
-            _download_file(official, zip_path, verify=False)
-            _extract_insightface_zip(zip_path, name)
-            if _insightface_model_ready(name):
-                logger.info("vision: InsightFace 模型已通过证书兜底下载完成")
-                return
-        except Exception as e:
-            errors.append(f"insecure fallback: {type(e).__name__}: {e}")
+        if ssl_failed:
+            official = f"https://github.com/deepinsight/insightface/releases/download/v0.7/{name}.zip"
+            try:
+                logger.warning("vision: 证书校验失败，尝试不校验证书下载官方模型包")
+                _download_file(official, zip_path, verify=False)
+                _extract_insightface_zip(zip_path, name)
+                if _insightface_model_ready(name):
+                    logger.info("vision: InsightFace 模型已通过证书兜底下载完成")
+                    return
+            except Exception as e:
+                errors.append(f"insecure fallback: {type(e).__name__}: {e}")
 
     detail = "\n".join(errors[-5:])
     raise VisionUnavailable(

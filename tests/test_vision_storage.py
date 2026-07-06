@@ -3,6 +3,20 @@ import os
 from pic_selecter import vision
 
 
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        yield b"model-zip"
+
+
 def test_model_storage_is_project_local_and_migrates_legacy_cache(tmp_path):
     project_root = tmp_path / "project"
     legacy_cache = tmp_path / "legacy_home" / ".cache"
@@ -64,3 +78,20 @@ def test_model_storage_is_project_local_and_migrates_legacy_cache(tmp_path):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def test_download_file_ignores_locked_fixed_tmp_name(tmp_path, monkeypatch):
+    dest = tmp_path / "buffalo_l.zip"
+    locked_tmp_name = dest.with_suffix(dest.suffix + ".tmp")
+    locked_tmp_name.mkdir()
+
+    def fake_get(url, stream, timeout, verify):
+        return _FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    vision._download_file("https://example.test/buffalo_l.zip", dest)
+
+    assert dest.read_bytes() == b"model-zip"
+    assert locked_tmp_name.is_dir()
+    assert not list(tmp_path.glob("buffalo_l.zip.*.tmp"))
