@@ -15,6 +15,17 @@ chcp 65001 >nul 2>&1
 
 cd /d "%~dp0"
 
+set "LAUNCHER_BASE=%CD%"
+if /I "%CD:~0,2%"=="C:" (
+  if exist "D:\" set "LAUNCHER_BASE=D:\xiaoyang-photo-picker-runtime"
+  if not exist "D:\" (
+    if exist "E:\" set "LAUNCHER_BASE=E:\xiaoyang-photo-picker-runtime"
+  )
+)
+if defined PIANKE_RUNTIME_DIR set "LAUNCHER_BASE=%PIANKE_RUNTIME_DIR%"
+set "LAUNCHER_CACHE=%LAUNCHER_BASE%\.launcher-cache"
+set "LAUNCHER_PYTHON_DIR=%LAUNCHER_BASE%\.launcher-python\Python311"
+
 echo.
 echo ============================================================
 echo   Pianke launcher
@@ -28,6 +39,9 @@ if not errorlevel 1 set "PY311=py -3.11"
 if not defined PY311 (
   python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
   if not errorlevel 1 set "PY311=python"
+)
+if not defined PY311 (
+  if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311="%LAUNCHER_PYTHON_DIR%\python.exe""
 )
 if not defined PY311 (
   if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY311="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
@@ -59,7 +73,7 @@ if not defined UV (
   echo.
   echo [first-run setup] Python 3.11 was not found.
   echo Trying to download uv ^(Python toolchain, ~30MB^)...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://astral.sh/uv/install.ps1' | Invoke-Expression"
   if errorlevel 1 (
     echo.
     echo [WARN] uv install failed. Network to astral.sh/GitHub may be blocked.
@@ -84,11 +98,20 @@ if not defined UV (
     echo.
     echo [WARN] winget did not finish Python installation.
     echo        Trying direct per-user Python 3.11 installer from python.org...
-    set "PY_INSTALLER=%TEMP%\python-3.11.9-amd64.exe"
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=Join-Path $env:TEMP 'python-3.11.9-amd64.exe'; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile $out"
+    set "PY_INSTALLER_ARCH=amd64"
+    set "PY_INSTALLER_NAME=python-3.11.9-amd64.exe"
+    if /I "%PROCESSOR_ARCHITECTURE%"=="x86" (
+      if "%PROCESSOR_ARCHITEW6432%"=="" (
+        set "PY_INSTALLER_ARCH=win32"
+        set "PY_INSTALLER_NAME=python-3.11.9.exe"
+      )
+    )
+    if not exist "%LAUNCHER_CACHE%" mkdir "%LAUNCHER_CACHE%" >nul 2>&1
+    set "PY_INSTALLER=%LAUNCHER_CACHE%\%PY_INSTALLER_NAME%"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=$env:PY_INSTALLER; $url='https://www.python.org/ftp/python/3.11.9/' + $env:PY_INSTALLER_NAME; Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out"
     if not errorlevel 1 (
-      start /wait "" "%PY_INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LOCALAPPDATA%\Programs\Python\Python311"
-      if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY311="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
+      start /wait "" "%PY_INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LAUNCHER_PYTHON_DIR%"
+      if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311="%LAUNCHER_PYTHON_DIR%\python.exe""
       if not defined PY311 (
         py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
         if not errorlevel 1 set "PY311=py -3.11"
