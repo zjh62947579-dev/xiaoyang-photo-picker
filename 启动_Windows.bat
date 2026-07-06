@@ -16,8 +16,9 @@ set "RC=1"
 
 cd /d "%~dp0"
 
-set "LAUNCHER_BASE=%CD%"
-if /I "%CD:~0,2%"=="C:" (
+set "PROJECT_DRIVE=%CD:~0,2%"
+set "LAUNCHER_BASE=%PROJECT_DRIVE%\xiaoyang-photo-picker-runtime"
+if /I "%PROJECT_DRIVE%"=="C:" (
   if exist "D:\" set "LAUNCHER_BASE=D:\xiaoyang-photo-picker-runtime"
   if not exist "D:\" (
     if exist "E:\" set "LAUNCHER_BASE=E:\xiaoyang-photo-picker-runtime"
@@ -35,6 +36,7 @@ echo.
 echo ============================================================
 echo   Pianke launcher
 echo ============================================================
+echo Runtime directory: %LAUNCHER_BASE%
 
 REM ---- 1. prefer an existing Python 3.11 ----
 set "PY311_EXE="
@@ -118,9 +120,8 @@ if not defined UV (
         set "PY_INSTALLER_NAME=python-3.11.9.exe"
       )
     )
-    if not exist "%LAUNCHER_CACHE%" mkdir "%LAUNCHER_CACHE%" >nul 2>&1
     set "PY_INSTALLER=%LAUNCHER_CACHE%\%PY_INSTALLER_NAME%"
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=$env:PY_INSTALLER; $url='https://www.python.org/ftp/python/3.11.9/' + $env:PY_INSTALLER_NAME; Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=$env:PY_INSTALLER; $dir=Split-Path -Parent $out; New-Item -ItemType Directory -Force -Path $dir | Out-Null; $url='https://www.python.org/ftp/python/3.11.9/' + $env:PY_INSTALLER_NAME; Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out"
     if not errorlevel 1 (
       start /wait "" "%PY_INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LAUNCHER_PYTHON_DIR%"
       if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311_EXE=%LAUNCHER_PYTHON_DIR%\python.exe"
