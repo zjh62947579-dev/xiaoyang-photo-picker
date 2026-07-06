@@ -120,10 +120,17 @@ if not defined UV (
         set "PY_INSTALLER_NAME=python-3.11.9.exe"
       )
     )
-    set "PY_INSTALLER=%LAUNCHER_CACHE%\%PY_INSTALLER_NAME%"
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=$env:PY_INSTALLER; $dir=Split-Path -Parent $out; New-Item -ItemType Directory -Force -Path $dir | Out-Null; $url='https://www.python.org/ftp/python/3.11.9/' + $env:PY_INSTALLER_NAME; Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out"
+    mkdir "%LAUNCHER_CACHE%" >nul 2>&1
+    set "PY_INSTALLER=%LAUNCHER_CACHE%\!PY_INSTALLER_NAME!"
+    set "PY_INSTALLER_URL=https://www.python.org/ftp/python/3.11.9/!PY_INSTALLER_NAME!"
+    echo        Downloading !PY_INSTALLER_NAME! to !PY_INSTALLER!
+    certutil -urlcache -f "!PY_INSTALLER_URL!" "!PY_INSTALLER!" >nul 2>&1
+    if errorlevel 1 (
+      echo        certutil download failed, trying PowerShell fallback...
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $env:PY_INSTALLER_URL -OutFile $env:PY_INSTALLER"
+    )
     if not errorlevel 1 (
-      start /wait "" "%PY_INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LAUNCHER_PYTHON_DIR%"
+      start /wait "" "!PY_INSTALLER!" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LAUNCHER_PYTHON_DIR%"
       if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311_EXE=%LAUNCHER_PYTHON_DIR%\python.exe"
       if not defined PY311_EXE (
         py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
