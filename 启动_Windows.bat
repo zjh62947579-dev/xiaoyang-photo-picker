@@ -20,7 +20,25 @@ echo ============================================================
 echo   Pianke launcher
 echo ============================================================
 
-REM ---- 1. find or install uv ----
+REM ---- 1. prefer an existing Python 3.11 ----
+set "PY311="
+py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
+if not errorlevel 1 set "PY311=py -3.11"
+
+if not defined PY311 (
+  python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
+  if not errorlevel 1 set "PY311=python"
+)
+
+if defined PY311 (
+  echo.
+  echo Found Python 3.11, starting launcher directly...
+  !PY311! scripts\launcher.py
+  set "RC=!errorlevel!"
+  goto :finish
+)
+
+REM ---- 2. find or install uv ----
 set "UV="
 where uv >nul 2>&1 && set "UV=uv"
 
@@ -33,18 +51,39 @@ if not defined UV (
 
 if not defined UV (
   echo.
-  echo [first-run setup] Downloading uv ^(Python toolchain, ~30MB^)...
-  echo   This step only happens once.
+  echo [first-run setup] Python 3.11 was not found.
+  echo Trying to download uv ^(Python toolchain, ~30MB^)...
   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
   if errorlevel 1 (
     echo.
-    echo [ERROR] uv install failed.
-    echo         Common cause: astral.sh CDN is overseas, network unstable.
-    echo         Retry later, or manually run in PowerShell:
-    echo           irm https://astral.sh/uv/install.ps1 ^| iex
+    echo [WARN] uv install failed. Network to astral.sh/GitHub may be blocked.
+    echo        Trying winget to install Python 3.11 instead...
+    where winget >nul 2>&1
+    if not errorlevel 1 (
+      winget install --id Python.Python.3.11 -e --source winget --accept-package-agreements --accept-source-agreements
+      py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
+      if not errorlevel 1 set "PY311=py -3.11"
+      if not defined PY311 (
+        python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY311=python"
+      )
+      if defined PY311 (
+        echo.
+        echo Python 3.11 installed, starting launcher...
+        !PY311! scripts\launcher.py
+        set "RC=!errorlevel!"
+        goto :finish
+      )
+    )
     echo.
-    pause
-    exit /b 1
+    echo [ERROR] Could not prepare Python automatically.
+    echo         Please install Python 3.11 manually from one of these sources:
+    echo         1. Microsoft Store: search "Python 3.11"
+    echo         2. Python.org: https://www.python.org/downloads/release/python-3119/
+    echo.
+    echo         After installing Python 3.11, double-click this file again.
+    set "RC=1"
+    goto :finish
   )
   REM re-probe after install
   if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV=%USERPROFILE%\.local\bin\uv.exe"
@@ -58,19 +97,19 @@ if not defined UV (
   echo.
   echo [ERROR] uv installed but executable not found.
   echo         Close this window and double-click the launcher again.
-  echo.
-  pause
-  exit /b 1
+  set "RC=1"
+  goto :finish
 )
 
 set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 
-REM ---- 2. run launcher.py via uv (uv will fetch Python 3.11 if needed) ----
+REM ---- 3. run launcher.py via uv (uv will fetch Python 3.11 if needed) ----
 echo.
-echo Preparing Python environment...
+echo Preparing Python environment via uv...
 "%UV%" run --no-project --python "3.11" -- python scripts\launcher.py
 set "RC=%errorlevel%"
 
+:finish
 if not "%RC%"=="0" (
   echo.
   echo [launcher exited with code %RC%]
