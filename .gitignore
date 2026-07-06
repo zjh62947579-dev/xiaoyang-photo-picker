@@ -40,6 +40,9 @@ img/
 .cache/
 .launcher-cache/
 .launcher-python/
+.uv-cache/
+.uv-python/
+.pip-cache/
 models/
 state.json
 *.session.json

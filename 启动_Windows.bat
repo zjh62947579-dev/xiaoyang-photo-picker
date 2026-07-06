@@ -12,6 +12,7 @@ REM   click "More info" -> "Run anyway". Won't show again.
 
 setlocal enableextensions enabledelayedexpansion
 chcp 65001 >nul 2>&1
+set "RC=1"
 
 cd /d "%~dp0"
 
@@ -25,6 +26,10 @@ if /I "%CD:~0,2%"=="C:" (
 if defined PIANKE_RUNTIME_DIR set "LAUNCHER_BASE=%PIANKE_RUNTIME_DIR%"
 set "LAUNCHER_CACHE=%LAUNCHER_BASE%\.launcher-cache"
 set "LAUNCHER_PYTHON_DIR=%LAUNCHER_BASE%\.launcher-python\Python311"
+set "PIANKE_RUNTIME_DIR=%LAUNCHER_BASE%"
+set "UV_CACHE_DIR=%LAUNCHER_BASE%\.uv-cache"
+set "UV_PYTHON_INSTALL_DIR=%LAUNCHER_BASE%\.uv-python"
+set "PIP_CACHE_DIR=%LAUNCHER_BASE%\.pip-cache"
 
 echo.
 echo ============================================================
@@ -32,28 +37,32 @@ echo   Pianke launcher
 echo ============================================================
 
 REM ---- 1. prefer an existing Python 3.11 ----
-set "PY311="
+set "PY311_EXE="
+set "PY311_ARGS="
 py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
-if not errorlevel 1 set "PY311=py -3.11"
+if not errorlevel 1 (
+  set "PY311_EXE=py"
+  set "PY311_ARGS=-3.11"
+)
 
-if not defined PY311 (
+if not defined PY311_EXE (
   python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
-  if not errorlevel 1 set "PY311=python"
+  if not errorlevel 1 set "PY311_EXE=python"
 )
-if not defined PY311 (
-  if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311="%LAUNCHER_PYTHON_DIR%\python.exe""
+if not defined PY311_EXE (
+  if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311_EXE=%LAUNCHER_PYTHON_DIR%\python.exe"
 )
-if not defined PY311 (
-  if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY311="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
+if not defined PY311_EXE (
+  if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY311_EXE=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
 )
-if not defined PY311 (
-  if exist "%ProgramFiles%\Python311\python.exe" set "PY311="%ProgramFiles%\Python311\python.exe""
+if not defined PY311_EXE (
+  if exist "%ProgramFiles%\Python311\python.exe" set "PY311_EXE=%ProgramFiles%\Python311\python.exe"
 )
 
-if defined PY311 (
+if defined PY311_EXE (
   echo.
   echo Found Python 3.11, starting launcher directly...
-  !PY311! scripts\launcher.py
+  "!PY311_EXE!" !PY311_ARGS! scripts\launcher.py
   set "RC=!errorlevel!"
   goto :finish
 )
@@ -82,15 +91,18 @@ if not defined UV (
     if not errorlevel 1 (
       winget install --id Python.Python.3.11 -e --source winget --accept-package-agreements --accept-source-agreements
       py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
-      if not errorlevel 1 set "PY311=py -3.11"
-      if not defined PY311 (
-        python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
-        if not errorlevel 1 set "PY311=python"
+      if not errorlevel 1 (
+        set "PY311_EXE=py"
+        set "PY311_ARGS=-3.11"
       )
-      if defined PY311 (
+      if not defined PY311_EXE (
+        python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY311_EXE=python"
+      )
+      if defined PY311_EXE (
         echo.
         echo Python 3.11 installed, starting launcher...
-        !PY311! scripts\launcher.py
+        "!PY311_EXE!" !PY311_ARGS! scripts\launcher.py
         set "RC=!errorlevel!"
         goto :finish
       )
@@ -111,15 +123,18 @@ if not defined UV (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; $out=$env:PY_INSTALLER; $url='https://www.python.org/ftp/python/3.11.9/' + $env:PY_INSTALLER_NAME; Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out"
     if not errorlevel 1 (
       start /wait "" "%PY_INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 Include_pip=1 PrependPath=1 TargetDir="%LAUNCHER_PYTHON_DIR%"
-      if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311="%LAUNCHER_PYTHON_DIR%\python.exe""
-      if not defined PY311 (
+      if exist "%LAUNCHER_PYTHON_DIR%\python.exe" set "PY311_EXE=%LAUNCHER_PYTHON_DIR%\python.exe"
+      if not defined PY311_EXE (
         py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1
-        if not errorlevel 1 set "PY311=py -3.11"
+        if not errorlevel 1 (
+          set "PY311_EXE=py"
+          set "PY311_ARGS=-3.11"
+        )
       )
-      if defined PY311 (
+      if defined PY311_EXE (
         echo.
         echo Python 3.11 installed, starting launcher...
-        !PY311! scripts\launcher.py
+        "!PY311_EXE!" !PY311_ARGS! scripts\launcher.py
         set "RC=!errorlevel!"
         goto :finish
       )
@@ -159,9 +174,10 @@ echo Preparing Python environment via uv...
 set "RC=%errorlevel%"
 
 :finish
-if not "%RC%"=="0" (
+echo.
+echo [launcher exited with code %RC%]
+if not "%PIANKE_NO_PAUSE%"=="1" (
   echo.
-  echo [launcher exited with code %RC%]
   pause
 )
 endlocal & exit /b %RC%

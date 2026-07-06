@@ -10,7 +10,7 @@
 
 约定：
 - 项目根目录 = 本脚本所在目录的父目录
-- venv 位于项目根目录的 .venv/
+- venv 默认位于项目根目录的 .venv/；设置 PIANKE_RUNTIME_DIR 后位于该目录
 - 依赖安装记录在 .pic_selecter_install.json
 """
 
@@ -35,7 +35,9 @@ GITHUB_REPO = "xiaoyang-photo-picker"
 GITHUB_BRANCH = "main"
 
 ROOT = Path(__file__).resolve().parent.parent
-VENV = ROOT / ".venv"
+RUNTIME_ROOT = Path(os.environ.get("PIANKE_RUNTIME_DIR") or ROOT).expanduser()
+RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+VENV = RUNTIME_ROOT / ".venv"
 INSTALL_INFO = ROOT / ".pic_selecter_install.json"
 
 IS_WIN = os.name == "nt"
