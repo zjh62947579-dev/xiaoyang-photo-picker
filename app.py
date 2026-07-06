@@ -2222,7 +2222,7 @@ def _wipe_caches(folder: str) -> None:
             logger.warning(f"清 _pic_selecter 目录失败: {e}")
 
 
-def _require_engine(engine: str) -> None:
+def _require_engine(engine: str, progress=None) -> None:
     """启动期硬校验当前 engine 的全部依赖。任何缺失 → 抛异常，由 _run_job 接住置 error。
 
     极速模式：cv2 (含 saliency 子模块) + imagehash —— 全部本地、无网络。
@@ -2253,14 +2253,14 @@ def _require_engine(engine: str) -> None:
             raise RuntimeError(f"[expert] 缺少 cv2：{e}") from e
         from pic_selecter import vision
         vision.require_expert_capabilities()  # imports 检查
-        vision.prewarm_all()                  # 真正加载模型权重；失败 raise
+        vision.prewarm_all(progress=progress)  # 真正加载模型权重；失败 raise
         logger.info("[expert] 依赖校验通过：DINOv2 / NIMA / MUSIQ / CLIP-IQA+ / InsightFace 全部就绪")
     elif engine == "tycoon":
         # 土豪模式：分组依赖 DINOv2 + InsightFace；初筛靠 LLM
         from pic_selecter import vision
         from pic_selecter import llm_judge
         vision.require_tycoon_capabilities()
-        vision.prewarm_tycoon()
+        vision.prewarm_tycoon(progress=progress)
         llm_judge.require_llm_capabilities()  # ARK_API_KEY + list_models() 联通
         logger.info("[tycoon] 依赖校验通过：DINOv2 / InsightFace + Ark 视觉 LLM 就绪")
     else:
@@ -2308,7 +2308,7 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
         job.label = f"校验 {engine} 模式依赖..."
         if jlog: jlog.event("CHECK", f"engine={engine} 依赖校验中…")
         logger.info(f"[{engine}] 启动任务：folder={folder} prescreen={prescreen_enabled}/{prescreen_strength} mode={mode}")
-        _require_engine(engine)
+        _require_engine(engine, progress=_job_progress)
         if jlog: jlog.event("CHECK", "依赖校验通过")
 
         job.status = "hashing"

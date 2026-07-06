@@ -28,7 +28,7 @@ import threading
 import uuid
 import zipfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import numpy as np
 from PIL import Image
@@ -855,7 +855,6 @@ def require_expert_capabilities() -> None:
         raise VisionUnavailable(
             f"专家模式缺少依赖：{', '.join(missing)}。请按 requirements.txt 安装完整依赖。"
         )
-    _ensure_insightface_model_files("buffalo_l")
 
 
 def require_tycoon_capabilities() -> None:
@@ -867,7 +866,6 @@ def require_tycoon_capabilities() -> None:
         raise VisionUnavailable(
             f"土豪模式缺少依赖：{', '.join(missing)}。请按 requirements.txt 安装。"
         )
-    _ensure_insightface_model_files("buffalo_l")
 
 
 def require_face_capabilities() -> None:
@@ -880,16 +878,66 @@ def require_face_capabilities() -> None:
     _ensure_insightface_model_files("buffalo_l")
 
 
-def prewarm_all() -> None:
+def _is_network_timeout_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(
+        marker in text
+        for marker in (
+            "urlopen error",
+            "WinError 10060",
+            "timed out",
+            "Read timed out",
+            "ConnectTimeout",
+            "ConnectionError",
+        )
+    )
+
+
+def _prewarm_step(label: str, func: Callable[[], object]) -> None:
+    try:
+        func()
+    except VisionUnavailable:
+        raise
+    except Exception as e:
+        if _is_network_timeout_error(e):
+            raise VisionUnavailable(
+                f"{label} 模型下载超时。\n"
+                "这通常是 Windows / 公司网络无法连接 GitHub、HuggingFace 或 PyTorch 权重源。\n"
+                "可以先切换到极速模式使用；如果必须用专家模式，请换网络/VPN 后重试，或把模型缓存准备好后再运行。\n"
+                f"原始错误：{type(e).__name__}: {e}"
+            ) from e
+        raise VisionUnavailable(f"{label} 初始化失败：{type(e).__name__}: {e}") from e
+
+
+def prewarm_all(progress: Callable[[int, int, str], None] | None = None) -> None:
     """专家模式预热全部模型；任一失败抛出。"""
-    _ensure_dinov2()
-    _ensure_nima()
-    _ensure_musiq()
-    _ensure_clipiqa()
-    _ensure_insightface()
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("DINOv2 画面语义模型", _ensure_dinov2),
+        ("NIMA 美学评分模型", _ensure_nima),
+        ("MUSIQ 技术质量模型", _ensure_musiq),
+        ("CLIP-IQA+ 美学模型", _ensure_clipiqa),
+        ("InsightFace 人脸模型", _ensure_insightface),
+    ]
+    total = len(steps)
+    for idx, (label, func) in enumerate(steps, 1):
+        if progress:
+            progress(idx - 1, total, f"校验 expert 模式依赖：正在加载 {label}...")
+        logger.info("vision: expert 预热 %s/%s：%s", idx, total, label)
+        _prewarm_step(label, func)
+        if progress:
+            progress(idx, total, f"校验 expert 模式依赖：{label} 已就绪")
 
 
-def prewarm_tycoon() -> None:
+def prewarm_tycoon(progress: Callable[[int, int, str], None] | None = None) -> None:
     """土豪模式预热：仅 DINOv2 + InsightFace（分组依赖）。"""
-    _ensure_dinov2()
-    _ensure_insightface()
+    steps: list[tuple[str, Callable[[], object]]] = [
+        ("DINOv2 画面语义模型", _ensure_dinov2),
+        ("InsightFace 人脸模型", _ensure_insightface),
+    ]
+    total = len(steps)
+    for idx, (label, func) in enumerate(steps, 1):
+        if progress:
+            progress(idx - 1, total, f"校验 tycoon 模式依赖：正在加载 {label}...")
+        _prewarm_step(label, func)
+        if progress:
+            progress(idx, total, f"校验 tycoon 模式依赖：{label} 已就绪")

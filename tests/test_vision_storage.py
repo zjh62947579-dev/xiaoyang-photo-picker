@@ -95,3 +95,18 @@ def test_download_file_ignores_locked_fixed_tmp_name(tmp_path, monkeypatch):
     assert dest.read_bytes() == b"model-zip"
     assert locked_tmp_name.is_dir()
     assert not list(tmp_path.glob("buffalo_l.zip.*.tmp"))
+
+
+def test_prewarm_step_wraps_network_timeout():
+    def fail():
+        raise OSError("[WinError 10060] 由于连接方在一段时间后没有正确答复")
+
+    try:
+        vision._prewarm_step("DINOv2", fail)
+    except vision.VisionUnavailable as e:
+        message = str(e)
+    else:
+        raise AssertionError("expected VisionUnavailable")
+
+    assert "DINOv2 模型下载超时" in message
+    assert "WinError 10060" in message
