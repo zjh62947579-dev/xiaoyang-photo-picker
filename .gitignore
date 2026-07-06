@@ -64,6 +64,7 @@ pianke-server*.log
 .claude/
 
 # ===== 临时 / 备份 =====
+dist/
 *.bak
 *.tmp
 *.log

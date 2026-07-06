@@ -81,14 +81,22 @@ Windows 启动器会优先使用本机已有的 Python 3.11；如果没有，再
 - 模型权重会保存在项目根目录的 `models/`，可复制到其它电脑复用；Windows 的 Python 运行时和 `.venv` 依赖环境可能保存在盘符根目录的 `xiaoyang-photo-picker-runtime/`，不会上传照片。
 - 如果浏览器没有自动打开，可以手动访问 `http://localhost:5057`。
 
-### 离线模型包复用
+### 制作带模型的离线包
 
-专家模式需要下载 DINOv2、InsightFace、MUSIQ、CLIP-IQA+ 等本地视觉模型。成功跑过一次后，项目根目录会出现 `models/` 文件夹。这个文件夹就是可复用的离线模型包：
+专家模式需要下载 DINOv2、InsightFace、MUSIQ、CLIP-IQA+ 等本地视觉模型。普通 GitHub 源码 ZIP 不适合直接塞进 1GB+ 模型文件；如果要给网络受限的朋友使用，建议在已下载成功的电脑上生成“带模型离线包”：
 
 1. 在能联网的电脑上用专家模式成功启动一次。
-2. 关闭程序，把整个 `models/` 文件夹复制出来。
-3. 在另一台电脑上，把 `models/` 放到项目根目录，也就是和 `app.py`、`README.md` 同一级。
-4. 再双击启动器。只要依赖环境已装好，专家模式会优先读取本地 `models/`，不会重新下载这些模型。
+2. 关闭程序，确认项目根目录下已有 `models/` 文件夹。
+3. 在项目根目录运行：
+
+   ```bash
+   python scripts/build_offline_bundle.py
+   ```
+
+4. 生成的 ZIP 在 `dist/` 目录，例如 `xiaoyang-photo-picker-offline-with-models-20260706-1200.zip`。
+5. 把这个 ZIP 发给另一台电脑，解压后双击启动器。专家模式会优先读取包内 `models/`，不会重新下载这些模型。
+
+如果不想打包整个项目，也可以只复制 `models/` 文件夹到另一台电脑的项目根目录，也就是和 `app.py`、`README.md` 同一级。
 
 注意：`models/` 可以跨电脑复制；`.venv/`、`xiaoyang-photo-picker-runtime/` 这类 Python 运行环境不建议跨电脑复制，容易因为路径、系统版本、CPU/GPU 依赖不同而失效。
 
