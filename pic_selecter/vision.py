@@ -40,6 +40,7 @@ _DOWNLOAD_LOCK = threading.Lock()
 _models: dict = {}
 _DEVICE = None
 _MODEL_STORAGE_READY = False
+HF_MIRROR = "https://hf-mirror.com"
 
 
 class VisionUnavailable(RuntimeError):
@@ -255,6 +256,8 @@ def _ensure_model_storage_configured() -> None:
         os.environ["HUGGINGFACE_ASSETS_CACHE"] = str(hf_home / "assets")
         os.environ["TRANSFORMERS_CACHE"] = str(hf_hub_cache)
         os.environ["HF_XET_CACHE"] = str(hf_home / "xet")
+        if os.environ.get("PIANKE_NO_MIRROR", "0") != "1":
+            os.environ.setdefault("HF_ENDPOINT", HF_MIRROR)
         os.environ["TORCH_HOME"] = str(torch_home)
         try:
             import torch.hub
@@ -489,6 +492,22 @@ def _prepare_onnxruntime() -> tuple[list[str], int]:
 # DINOv2-small：384 维语义特征（不变）
 # =============================================================
 
+def _load_dinov2_from_hf(*, local_files_only: bool):
+    from transformers import AutoImageProcessor, AutoModel
+
+    processor = AutoImageProcessor.from_pretrained(
+        "facebook/dinov2-small",
+        local_files_only=local_files_only,
+        cache_dir=str(_hf_hub_cache()),
+    )
+    model = AutoModel.from_pretrained(
+        "facebook/dinov2-small",
+        local_files_only=local_files_only,
+        cache_dir=str(_hf_hub_cache()),
+    ).to(_device()).eval()
+    return model, processor
+
+
 def _ensure_dinov2():
     _ensure_model_storage_configured()
     if "dinov2" in _models:
@@ -506,25 +525,29 @@ def _ensure_dinov2():
         logger.info("vision: 加载 DINOv2-small（首次约 86MB）…")
         # 优先用本地缓存（HF 在国内常 SSL EOF；缓存命中时绕开 HEAD 校验）
         try:
-            processor = AutoImageProcessor.from_pretrained(
-                "facebook/dinov2-small",
-                local_files_only=True,
-                cache_dir=str(_hf_hub_cache()),
-            )
-            model = AutoModel.from_pretrained(
-                "facebook/dinov2-small",
-                local_files_only=True,
-                cache_dir=str(_hf_hub_cache()),
-            ).to(_device()).eval()
-        except Exception:
-            processor = AutoImageProcessor.from_pretrained(
-                "facebook/dinov2-small",
-                cache_dir=str(_hf_hub_cache()),
-            )
-            model = AutoModel.from_pretrained(
-                "facebook/dinov2-small",
-                cache_dir=str(_hf_hub_cache()),
-            ).to(_device()).eval()
+            model, processor = _load_dinov2_from_hf(local_files_only=True)
+        except Exception as local_error:
+            try:
+                model, processor = _load_dinov2_from_hf(local_files_only=False)
+            except Exception as first_remote_error:
+                cache_path = _hf_model_dir("facebook/dinov2-small")
+                logger.warning(
+                    "vision: DINOv2 加载失败，清理可能损坏的缓存后重试。local=%s remote=%s",
+                    local_error,
+                    first_remote_error,
+                )
+                shutil.rmtree(cache_path, ignore_errors=True)
+                try:
+                    model, processor = _load_dinov2_from_hf(local_files_only=False)
+                except Exception as e:
+                    raise VisionUnavailable(
+                        "DINOv2 画面语义模型加载失败。\n"
+                        "常见原因是 HuggingFace 模型下载中断，导致本地缓存缺少 preprocessor_config.json。\n"
+                        f"已尝试使用模型缓存目录：{_hf_hub_cache()}\n"
+                        "请更新到最新版后重试；仍失败时，请换网络/VPN 后重新运行，或删除 "
+                        f"{cache_path} 后再试。\n"
+                        f"最近错误：{type(e).__name__}: {e}"
+                    ) from e
         _models["dinov2"] = (model, processor)
         logger.info("vision: DINOv2-small 就绪")
     return _models["dinov2"]

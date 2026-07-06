@@ -58,6 +58,7 @@ def test_model_storage_is_project_local_and_migrates_legacy_cache(tmp_path):
         assert vision._cache_dir() == models_root
         assert os.environ["HF_HOME"] == str(models_root / "huggingface")
         assert os.environ["HF_HUB_CACHE"] == str(models_root / "huggingface" / "hub")
+        assert os.environ["HF_ENDPOINT"] == vision.HF_MIRROR
         assert os.environ["TORCH_HOME"] == str(models_root / "torch")
 
         assert (models_root / "huggingface" / "hub" / "models--facebook--dinov2-small" / "refs" / "main").exists()
