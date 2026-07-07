@@ -74,6 +74,8 @@
 
 Windows 启动器会优先使用本机已有的 Python 3.11；如果没有，再尝试 `uv`，之后依次尝试 `winget` 和 python.org 官方安装包安装 Python 3.11。自动下载、Python 运行时、`.venv` 依赖环境和安装缓存会放到当前盘符根目录的 `xiaoyang-photo-picker-runtime`；若项目在 C 盘，会优先改用 `D:\xiaoyang-photo-picker-runtime`，没有 D 盘时尝试 E 盘。也可以提前设置 `PIANKE_RUNTIME_DIR=E:\xiaoyang-photo-picker-runtime` 手动指定位置。网络受限的电脑也可以先手动安装 Python 3.11，再重新双击启动器。
 
+如果 D 盘空间不够、希望运行环境放到 C 盘，Windows 用户可直接双击 `启动_Windows_运行环境放C盘.bat`。它会把 Python 运行时、`.venv` 依赖环境和安装缓存放到 `C:\xiaoyang-photo-picker-runtime`。
+
 首次启动说明：
 
 - 极速模式会安装基础图像处理依赖，通常几分钟内完成。
