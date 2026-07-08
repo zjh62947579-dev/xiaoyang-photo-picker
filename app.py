@@ -268,6 +268,34 @@ def training_salt_path(folder: str) -> Path:
     return training_dir(folder) / ".salt"
 
 
+def global_training_dir() -> Path:
+    override = os.environ.get("PIC_SELECTER_TRAINING_DIR")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
+        return Path(base) / "xiaoyang-photo-picker" / "training"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "xiaoyang-photo-picker" / "training"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "xiaoyang-photo-picker" / "training"
+
+
+def global_training_salt_path() -> Path:
+    return global_training_dir() / ".salt"
+
+
+def global_decisions_log_path() -> Path:
+    return global_training_dir() / "decisions.jsonl"
+
+
+def global_features_log_path() -> Path:
+    return global_training_dir() / "features.jsonl"
+
+
+def global_sessions_log_path() -> Path:
+    return global_training_dir() / "sessions.jsonl"
+
+
 def state_path(folder: str) -> Path:
     return Path(folder) / STATE_FILENAME
 
@@ -2178,8 +2206,7 @@ TRAINING_FEATURE_KEYS = (
 )
 
 
-def _training_salt(folder: str) -> str:
-    p = training_salt_path(folder)
+def _read_or_create_salt(p: Path) -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists():
         try:
@@ -2197,9 +2224,28 @@ def _training_salt(folder: str) -> str:
     return value
 
 
+def _training_salt(folder: str) -> str:
+    return _read_or_create_salt(training_salt_path(folder))
+
+
+def _global_training_salt() -> str:
+    return _read_or_create_salt(global_training_salt_path())
+
+
+def _session_id(session: "SessionState") -> str:
+    salt = _global_training_salt()
+    basis = str(Path(session.folder).resolve())
+    return hashlib.sha256(f"{salt}|session|{basis}".encode("utf-8")).hexdigest()[:24]
+
+
+def _session_feature_fingerprint(session: "SessionState") -> str:
+    ids = sorted(_anon_image_id(path, session) for path in session.meta.keys())
+    payload = "|".join(ids)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
 def _anon_image_id(path: str, session: Optional[SessionState] = None) -> str:
-    folder = session.folder if session else ""
-    salt = _training_salt(folder) if folder else uuid.uuid4().hex
+    salt = _global_training_salt()
     return hashlib.sha256(f"{salt}|{Path(path).resolve()}".encode("utf-8")).hexdigest()[:24]
 
 
@@ -2227,22 +2273,87 @@ def _append_training_decision(session: Optional[SessionState], payload: dict) ->
     if session is None or not session.record_preferences:
         return
     try:
-        path = decisions_log_path(session.folder)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _append_global_session_features(session)
         entry = {
             "schema": 1,
             "app": "xiaoyang-photo-picker",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "session_id": _session_id(session),
             "mode": session.mode,
             "engine": session.engine,
             "runtime": session.runtime,
             "scene_label": session.scene_label or "",
             **payload,
         }
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+        line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
+        local_path = decisions_log_path(session.folder)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with local_path.open("a", encoding="utf-8") as f:
+            f.write(line)
+        global_path = global_decisions_log_path()
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        with global_path.open("a", encoding="utf-8") as f:
+            f.write(line)
     except Exception as e:
         logger.warning(f"写训练数据失败: {e}")
+
+
+def _append_global_session_features(session: Optional[SessionState]) -> None:
+    if session is None or not session.record_preferences:
+        return
+    marker = training_dir(session.folder) / ".global_features_exported"
+    fingerprint = _session_feature_fingerprint(session)
+    if marker.exists():
+        try:
+            exported = set(marker.read_text(encoding="utf-8").splitlines())
+            if fingerprint in exported:
+                return
+        except OSError:
+            pass
+    try:
+        sid = _session_id(session)
+        feature_path = global_features_log_path()
+        feature_path.parent.mkdir(parents=True, exist_ok=True)
+        seen_ids: set[str] = set()
+        with feature_path.open("a", encoding="utf-8") as f:
+            for path in sorted(session.meta.keys()):
+                image_id = _anon_image_id(path, session)
+                if image_id in seen_ids:
+                    continue
+                seen_ids.add(image_id)
+                f.write(json.dumps({
+                    "schema": 1,
+                    "app": "xiaoyang-photo-picker",
+                    "session_id": sid,
+                    "image_id": image_id,
+                    "features": _training_features_for(path, session),
+                }, ensure_ascii=False, sort_keys=True) + "\n")
+
+        session_meta = {
+            "schema": 1,
+            "app": "xiaoyang-photo-picker",
+            "session_id": sid,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "engine": session.engine,
+            "runtime": session.runtime,
+            "mode": session.mode,
+            "scene_label": session.scene_label or "",
+            "image_count": len(session.meta),
+            "privacy": {
+                "contains_original_paths": False,
+                "contains_exif_gps": False,
+                "image_ids": "salted_sha256_prefix_24",
+            },
+        }
+        sessions_path = global_sessions_log_path()
+        sessions_path.parent.mkdir(parents=True, exist_ok=True)
+        with sessions_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(session_meta, ensure_ascii=False, sort_keys=True) + "\n")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        with marker.open("a", encoding="utf-8") as f:
+            f.write(fingerprint + "\n")
+    except Exception as e:
+        logger.warning(f"写全局训练特征失败: {e}")
 
 
 def _wipe_caches(folder: str) -> None:
@@ -4109,55 +4220,95 @@ def api_skipped():
 
 @app.route("/api/training_export")
 def api_training_export():
-    if SESSION is None:
+    scope = str(request.args.get("scope", "global")).lower()
+    if scope not in {"global", "session"}:
+        scope = "global"
+    if scope == "session" and SESSION is None:
         return jsonify({"error": "no session"}), 400
     include_thumbnails = str(request.args.get("include_thumbnails", "")).lower() in {"1", "true", "yes"}
-    decisions_path = decisions_log_path(SESSION.folder)
-    decisions_text = ""
-    decision_count = 0
-    if decisions_path.exists():
-        decisions_text = decisions_path.read_text(encoding="utf-8")
-        decision_count = sum(1 for line in decisions_text.splitlines() if line.strip())
 
-    feature_lines: list[str] = []
-    seen_ids: set[str] = set()
-    for path in sorted(SESSION.meta.keys()):
-        image_id = _anon_image_id(path, SESSION)
-        if image_id in seen_ids:
-            continue
-        seen_ids.add(image_id)
-        feature_lines.append(json.dumps({
+    def _read_text(path: Path) -> str:
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def _line_count(text: str) -> int:
+        return sum(1 for line in text.splitlines() if line.strip())
+
+    sessions_text = ""
+    thumbnail_paths: list[str] = []
+    if scope == "global":
+        if SESSION is not None:
+            _append_global_session_features(SESSION)
+        decisions_text = _read_text(global_decisions_log_path())
+        features_text = _read_text(global_features_log_path())
+        sessions_text = _read_text(global_sessions_log_path())
+        decision_count = _line_count(decisions_text)
+        feature_count = _line_count(features_text)
+        session_count = _line_count(sessions_text)
+        meta = {
             "schema": 1,
-            "image_id": image_id,
-            "features": _training_features_for(path, SESSION),
-        }, ensure_ascii=False, sort_keys=True))
-    features_text = "\n".join(feature_lines) + ("\n" if feature_lines else "")
-
-    meta = {
-        "schema": 1,
-        "app": "xiaoyang-photo-picker",
-        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "engine": SESSION.engine,
-        "runtime": SESSION.runtime,
-        "mode": SESSION.mode,
-        "scene_label": SESSION.scene_label or "",
-        "decision_count": decision_count,
-        "feature_count": len(feature_lines),
-        "contains_images": include_thumbnails,
-        "privacy": {
-            "contains_original_paths": False,
-            "contains_exif_gps": False,
-            "image_ids": "salted_sha256_prefix_24",
-        },
-    }
+            "app": "xiaoyang-photo-picker",
+            "scope": "global",
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "decision_count": decision_count,
+            "feature_count": feature_count,
+            "session_count": session_count,
+            "contains_images": False,
+            "privacy": {
+                "contains_original_paths": False,
+                "contains_exif_gps": False,
+                "image_ids": "salted_sha256_prefix_24",
+            },
+        }
+    else:
+        assert SESSION is not None
+        decisions_text = _read_text(decisions_log_path(SESSION.folder))
+        decision_count = _line_count(decisions_text)
+        feature_lines: list[str] = []
+        seen_ids: set[str] = set()
+        sid = _session_id(SESSION)
+        for path in sorted(SESSION.meta.keys()):
+            image_id = _anon_image_id(path, SESSION)
+            if image_id in seen_ids:
+                continue
+            seen_ids.add(image_id)
+            feature_lines.append(json.dumps({
+                "schema": 1,
+                "app": "xiaoyang-photo-picker",
+                "session_id": sid,
+                "image_id": image_id,
+                "features": _training_features_for(path, SESSION),
+            }, ensure_ascii=False, sort_keys=True))
+            thumbnail_paths.append(path)
+        features_text = "\n".join(feature_lines) + ("\n" if feature_lines else "")
+        meta = {
+            "schema": 1,
+            "app": "xiaoyang-photo-picker",
+            "scope": "session",
+            "session_id": sid,
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "engine": SESSION.engine,
+            "runtime": SESSION.runtime,
+            "mode": SESSION.mode,
+            "scene_label": SESSION.scene_label or "",
+            "decision_count": decision_count,
+            "feature_count": len(feature_lines),
+            "contains_images": include_thumbnails,
+            "privacy": {
+                "contains_original_paths": False,
+                "contains_exif_gps": False,
+                "image_ids": "salted_sha256_prefix_24",
+            },
+        }
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("decisions.jsonl", decisions_text)
         zf.writestr("features.jsonl", features_text)
         zf.writestr("session_meta.json", json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True))
-        if include_thumbnails:
-            for path in sorted(SESSION.meta.keys()):
+        if scope == "global":
+            zf.writestr("sessions.jsonl", sessions_text)
+        if include_thumbnails and scope == "session" and SESSION is not None:
+            for path in thumbnail_paths:
                 p = Path(path)
                 if not p.exists():
                     continue
@@ -4184,7 +4335,7 @@ def api_training_export():
         buf,
         mimetype="application/zip",
         as_attachment=True,
-        download_name=f"training_export_{stamp}.zip",
+        download_name=f"training_export_{scope}_{stamp}.zip",
     )
 
 

@@ -336,7 +336,8 @@ def test_refine_winners_reuses_archived_winners_and_sends_rejects_to_duplicate_l
     assert (tmp_path / "losers" / "重复落选" / "two.jpg").exists()
 
 
-def test_training_decisions_log_pk_and_prescreen_restore_without_paths(tmp_path):
+def test_training_decisions_log_pk_and_prescreen_restore_without_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIC_SELECTER_TRAINING_DIR", str(tmp_path / "global_training"))
     app = import_app_module()
     left = make_info(tmp_path / "left.jpg", score=80, face_count=1)
     right = make_info(tmp_path / "right.jpg", score=70, face_count=0)
@@ -367,8 +368,15 @@ def test_training_decisions_log_pk_and_prescreen_restore_without_paths(tmp_path)
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert records[0]["decision_type"] == "pk"
     assert records[0]["scene_label"] == "旅行"
+    assert records[0]["session_id"]
     assert records[0]["winner"]["features"]["face_count"] == 1
     assert str(tmp_path) not in json.dumps(records, ensure_ascii=False)
+    global_records = [
+        json.loads(line)
+        for line in app.global_decisions_log_path().read_text(encoding="utf-8").splitlines()
+    ]
+    assert global_records[0]["decision_type"] == "pk"
+    assert str(tmp_path) not in json.dumps(global_records, ensure_ascii=False)
 
     bad = make_info(tmp_path / "bad.jpg", score=8, auto_reject=True, reason="严重模糊")
     app.SESSION = app.build_prescreen_session_from_infos(
@@ -397,7 +405,8 @@ def test_training_decisions_log_pk_and_prescreen_restore_without_paths(tmp_path)
     assert str(tmp_path) not in json.dumps(records, ensure_ascii=False)
 
 
-def test_training_export_contains_anonymized_jsonl_files(tmp_path):
+def test_training_export_contains_global_anonymized_jsonl_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIC_SELECTER_TRAINING_DIR", str(tmp_path / "global_training"))
     app = import_app_module()
     one = make_info(tmp_path / "one.jpg", score=80, face_count=1)
     two = make_info(tmp_path / "two.jpg", score=75, face_count=0)
@@ -423,16 +432,58 @@ def test_training_export_contains_anonymized_jsonl_files(tmp_path):
     assert resp.status_code == 200
     with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
         names = set(zf.namelist())
-        assert {"decisions.jsonl", "features.jsonl", "session_meta.json"} <= names
+        assert {"decisions.jsonl", "features.jsonl", "sessions.jsonl", "session_meta.json"} <= names
+        combined = (
+            zf.read("decisions.jsonl").decode("utf-8") +
+            zf.read("features.jsonl").decode("utf-8") +
+            zf.read("sessions.jsonl").decode("utf-8") +
+            zf.read("session_meta.json").decode("utf-8")
+        )
+        meta = json.loads(zf.read("session_meta.json"))
+
+    assert meta["scope"] == "global"
+    assert meta["session_count"] == 1
+    assert meta["decision_count"] == 1
+    assert meta["feature_count"] == 2
+    assert meta["contains_images"] is False
+    assert str(tmp_path) not in combined
+
+
+def test_session_training_export_still_available(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIC_SELECTER_TRAINING_DIR", str(tmp_path / "global_training"))
+    app = import_app_module()
+    one = make_info(tmp_path / "one.jpg", score=80, face_count=1)
+    two = make_info(tmp_path / "two.jpg", score=75, face_count=0)
+    app.SESSION = app.build_session_from_groups(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        raw_groups=[[one, two]],
+        infos=[one, two],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=False,
+        prescreen_strength="standard",
+        record_preferences=True,
+        scene_label="亲子",
+    )
+
+    client = app.app.test_client()
+    client.post("/api/choose", json={"loser": "right"}, headers=LOCAL_HEADERS)
+    resp = client.get("/api/training_export?scope=session", headers=LOCAL_HEADERS)
+
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.data)) as zf:
+        meta = json.loads(zf.read("session_meta.json"))
         combined = (
             zf.read("decisions.jsonl").decode("utf-8") +
             zf.read("features.jsonl").decode("utf-8") +
             zf.read("session_meta.json").decode("utf-8")
         )
-        meta = json.loads(zf.read("session_meta.json"))
 
+    assert meta["scope"] == "session"
     assert meta["scene_label"] == "亲子"
-    assert meta["contains_images"] is False
     assert str(tmp_path) not in combined
 
 
