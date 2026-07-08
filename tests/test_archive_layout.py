@@ -36,7 +36,8 @@ def test_apply_group_archives_winners_by_face_category_and_losers_by_reason(tmp_
 
     app_module.apply_group(group, str(tmp_path), dry_run=False, mode="copy", session=session)
 
-    assert (tmp_path / "winners" / "人像" / "A" / "B" / "winner.jpg").exists()
+    assert (tmp_path / "winners" / "人像" / "winner.jpg").exists()
+    assert not (tmp_path / "winners" / "人像" / "A").exists()
     assert (tmp_path / "losers" / "模糊" / "A" / "B" / "blurry.jpg").exists()
     assert (tmp_path / "losers" / "重复落选" / "duplicate.jpg").exists()
 
@@ -66,7 +67,8 @@ def test_restore_rejected_archives_to_review_folder(tmp_path):
 
     assert resp.status_code == 200
     assert resp.get_json()["ok"] is True
-    assert (tmp_path / "review" / "合照" / "set1" / "召回保留" / "loser.jpg").exists()
+    assert (tmp_path / "review" / "合照" / "召回保留" / "loser.jpg").exists()
+    assert not (tmp_path / "review" / "合照" / "set1").exists()
 
 
 def test_face_count_archives_to_expected_winner_categories(tmp_path):
@@ -85,3 +87,29 @@ def test_face_count_archives_to_expected_winner_categories(tmp_path):
         app_module.apply_group(group, str(tmp_path), dry_run=False, mode="copy", session=session)
 
         assert (tmp_path / "winners" / category / f"face_{count}.jpg").exists()
+
+
+def test_flat_winner_categories_keep_duplicate_names_unique(tmp_path):
+    a_dir = tmp_path / "A"
+    b_dir = tmp_path / "B"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    winner = _write_photo(a_dir / "same.jpg")
+    extra = _write_photo(b_dir / "same.jpg")
+    group = app_module.GroupState(
+        images=[winner, extra],
+        winner=winner,
+        extra_winners=[extra],
+        finished=True,
+    )
+    session = _session(tmp_path, group)
+    session.meta[winner] = {"face_count": 0}
+    session.meta[extra] = {"face_count": 0}
+
+    app_module.apply_group(group, str(tmp_path), dry_run=False, mode="copy", session=session)
+
+    flat_dir = tmp_path / "winners" / "风景"
+    assert (flat_dir / "same.jpg").exists()
+    assert (flat_dir / "same_1.jpg").exists()
+    assert not (flat_dir / "A").exists()
+    assert not (flat_dir / "B").exists()

@@ -259,7 +259,7 @@ def test_skip_duplicate_with_prescreen_archives_passed_and_restored_as_winners(t
     assert app.SESSION.skip_duplicate_selection is True
     assert app.SESSION.prescreen_reviewed is True
     assert all(group.finished for group in app.SESSION.groups)
-    assert (tmp_path / "winners" / "风景" / "day1" / "good.jpg").exists()
+    assert (tmp_path / "winners" / "风景" / "good.jpg").exists()
     assert (tmp_path / "winners" / "人像" / "restore.jpg").exists()
     assert (tmp_path / "losers" / "模糊" / "drop.jpg").exists()
 
@@ -286,7 +286,7 @@ def test_skip_duplicate_without_prescreen_keeps_all_readable_photos(tmp_path):
     assert len(sess.groups) == 2
     assert all(group.finished and group.winner for group in sess.groups)
     assert (tmp_path / "winners" / "风景" / "one.jpg").exists()
-    assert (tmp_path / "winners" / "合照" / "nested" / "two.jpg").exists()
+    assert (tmp_path / "winners" / "合照" / "two.jpg").exists()
 
 
 def test_refine_winners_reuses_archived_winners_and_sends_rejects_to_duplicate_losers(tmp_path, monkeypatch):

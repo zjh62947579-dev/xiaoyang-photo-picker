@@ -1375,9 +1375,9 @@ def _archive_dir_for(kind: str, folder: str, path: str,
                      session: Optional[SessionState]) -> Path:
     rel_parts = _relative_parent_parts(path, folder)
     if kind == "winner":
-        return winners_dir(folder) / _face_category_for(path, session) / Path(*rel_parts)
+        return winners_dir(folder) / _face_category_for(path, session)
     if kind == "restored":
-        return review_dir(folder) / _face_category_for(path, session) / Path(*rel_parts) / "召回保留"
+        return review_dir(folder) / _face_category_for(path, session) / "召回保留"
     if kind == "loser" and group is not None:
         return losers_dir(folder) / _loser_category_for(path, group) / Path(*rel_parts)
     return losers_dir(folder) / "重复落选" / Path(*rel_parts)
