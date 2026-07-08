@@ -104,6 +104,12 @@
             </svg>
           </button>
         </div>
+        <div class="batch-entry">
+          <button type="button" id="btn-start-batch" class="btn-ghost">
+            批量预跑总文件夹
+          </button>
+          <span>总文件夹下每个一级子文件夹会独立生成进度，第二天逐个继续处理。</span>
+        </div>
 
         <!-- 路径选好后浮出的"文件夹快照"：纯文件系统数据，0 推理 -->
         <div id="folder-snapshot" class="folder-snapshot hidden">
@@ -263,6 +269,50 @@
       </div>
     </footer>
   </div>
+</section>
+
+<!-- ============ 批量预跑页 ============ -->
+<section id="view-batch" class="view">
+  <div class="grain"></div>
+  <header class="preview-header">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-tiny">小羊帮你筛照片 · 批量预跑</span>
+    </div>
+    <div class="header-actions">
+      <button id="btn-batch-cancel" class="btn-ghost">中止批量</button>
+      <button class="btn-ghost btn-go-home" title="回到主页">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3 12L12 4L21 12M5 10V20H10V14H14V20H19V10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>回主页</span>
+      </button>
+    </div>
+  </header>
+  <main class="batch-shell">
+    <p class="eyebrow center">夜里先分析，早上再决定</p>
+    <h2 class="preview-title">批量预跑路线文件夹</h2>
+    <p class="preview-sub" id="batch-root">—</p>
+
+    <div class="batch-summary">
+      <div class="stat"><div class="stat-num" id="batch-done">0</div><div class="stat-cap">已处理</div></div>
+      <div class="stat"><div class="stat-num" id="batch-total">0</div><div class="stat-cap">路线文件夹</div></div>
+      <div class="stat highlight"><div class="stat-num" id="batch-ready">0</div><div class="stat-cap">可继续</div></div>
+      <div class="stat"><div class="stat-num" id="batch-error-count">0</div><div class="stat-cap">失败</div></div>
+    </div>
+
+    <div class="progress batch-progress">
+      <div class="progress-bar"><div id="batch-progress-fill" class="progress-fill"></div></div>
+      <div class="progress-meta">
+        <span id="batch-progress-count">0 / 0</span>
+        <span id="batch-progress-pct">0%</span>
+      </div>
+    </div>
+    <p id="batch-label" class="proc-label center">准备中</p>
+    <p id="batch-error" class="form-error center"></p>
+
+    <div id="batch-list" class="batch-list"></div>
+  </main>
 </section>
 
 <!-- ============ 处理进度页（照片墙版） ============ -->

@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import pickle
 import shutil
 import socket
 import subprocess
@@ -183,6 +184,48 @@ class JobState:
     event_seq: int = 0
 
 
+@dataclass
+class BatchItemState:
+    folder: str
+    name: str
+    status: str = "pending"  # pending | running | ready | skipped | error | cancelled
+    image_count: int = 0
+    rejected_count: int = 0
+    skipped_count: int = 0
+    label: str = ""
+    error: Optional[str] = None
+    started_at: float = 0.0
+    finished_at: float = 0.0
+
+
+@dataclass
+class BatchJobState:
+    root: str
+    status: str = "idle"  # idle | running | done | error | cancelled
+    items: list[BatchItemState] = field(default_factory=list)
+    current_index: int = -1
+    done: int = 0
+    total: int = 0
+    label: str = ""
+    error: Optional[str] = None
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    cancel_requested: bool = False
+    mode: str = "copy"
+    engine: str = "fast"
+    runtime: str = "auto"
+    threshold_near: int = THRESHOLD_NEAR
+    threshold_far: int = THRESHOLD_FAR
+    near_seconds: int = NEAR_SECONDS
+    prescreen_enabled: bool = True
+    prescreen_strength: str = "standard"
+    skip_duplicate_selection: bool = False
+    record_preferences: bool = True
+    scene_label: str = ""
+    face_aware: bool = True
+    llm_model: Optional[str] = None
+
+
 # ---------------- 路径 / 日志 ----------------
 
 def winners_dir(folder: str) -> Path:
@@ -207,6 +250,10 @@ def thumbs_dir(folder: str) -> Path:
 
 def skipped_log_path(folder: str) -> Path:
     return pic_dir(folder) / "skipped.log"
+
+
+def infos_cache_path(folder: str) -> Path:
+    return pic_dir(folder) / "infos.pkl"
 
 
 def training_dir(folder: str) -> Path:
@@ -802,8 +849,28 @@ def _prescreen_rejections(infos: list[ImageInfo]) -> tuple[list[str], dict[str, 
 def _infos_from_memory_or_cache(folder: str) -> list[ImageInfo]:
     if LAST_INFOS:
         return LAST_INFOS
-    # 缓存已禁用：LAST_INFOS 没有就空列表（用户需要重新 /api/start）
+    p = infos_cache_path(folder)
+    if p.exists():
+        try:
+            with p.open("rb") as f:
+                infos = pickle.load(f)
+            if isinstance(infos, list):
+                return [i for i in infos if isinstance(i, ImageInfo)]
+        except Exception as e:
+            logger.warning(f"读取分析缓存失败 {p}: {e}")
     return []
+
+
+def _save_infos_cache(folder: str, infos: list[ImageInfo]) -> None:
+    try:
+        d = pic_dir(folder)
+        d.mkdir(exist_ok=True)
+        tmp = infos_cache_path(folder).with_suffix(".pkl.tmp")
+        with tmp.open("wb") as f:
+            pickle.dump(infos, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(infos_cache_path(folder))
+    except Exception as e:
+        logger.warning(f"写分析缓存失败: {e}")
 
 
 def build_prescreen_session_from_infos(
@@ -1741,6 +1808,7 @@ def _thumb_cache_key(rel: str, mtime: float, size: int, max_side: int) -> str:
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 SESSION: Optional[SessionState] = None
 JOB: Optional[JobState] = None
+BATCH_JOB: Optional[BatchJobState] = None
 LOCK = threading.Lock()
 # Phase 4 预览阶段保留的 infos（任务完成后可重新分组而不重哈希）
 LAST_INFOS: Optional[list[ImageInfo]] = None
@@ -2283,6 +2351,195 @@ def _require_engine(engine: str, progress=None) -> None:
         raise ValueError(f"未知 engine: {engine!r}")
 
 
+def _is_job_running(job: Optional[JobState]) -> bool:
+    return bool(job and job.status in ("pending", "scanning", "hashing", "grouping", "checking"))
+
+
+def _is_batch_running(job: Optional[BatchJobState]) -> bool:
+    return bool(job and job.status == "running")
+
+
+def _has_prior_outputs_or_state(folder: str) -> bool:
+    p = Path(folder)
+    return (
+        state_path(folder).exists()
+        or (p / "winners").exists()
+        or (p / "losers").exists()
+        or (p / "review").exists()
+    )
+
+
+def _count_photos_recursive(folder: Path) -> int:
+    count = 0
+    skip_names = {"winners", "losers", "review", PIC_DIR}
+    try:
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if d not in skip_names]
+            for name in files:
+                if Path(name).suffix.lower() in grouper.ALL_INPUT_EXTS:
+                    count += 1
+    except OSError:
+        return count
+    return count
+
+
+def _discover_batch_items(root: str) -> list[BatchItemState]:
+    base = Path(root)
+    items: list[BatchItemState] = []
+    skip_names = {"winners", "losers", "review", PIC_DIR}
+    for child in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir() or child.name in skip_names:
+            continue
+        count = _count_photos_recursive(child)
+        if count <= 0:
+            continue
+        items.append(BatchItemState(folder=str(child), name=child.name, image_count=count))
+    return items
+
+
+def _batch_progress(item: BatchItemState, done: int, total: int, label: str) -> None:
+    item.label = label
+    if total:
+        item.image_count = total
+    if BATCH_JOB is not None:
+        BATCH_JOB.label = f"{item.name} · {label}"
+
+
+def _run_batch_job() -> None:
+    global BATCH_JOB
+    job = BATCH_JOB
+    assert job is not None
+    job.started_at = time.time()
+    job.status = "running"
+    job.label = "准备批量预跑..."
+
+    try:
+        _apply_runtime_selection(job.runtime)
+        job.label = f"校验 {job.engine} 模式依赖..."
+        _require_engine(
+            job.engine,
+            progress=lambda done, total, label: setattr(job, "label", label),
+        )
+
+        for idx, item in enumerate(job.items):
+            if job.cancel_requested:
+                item.status = "cancelled"
+                item.label = "已取消"
+                break
+            job.current_index = idx
+            if _has_prior_outputs_or_state(item.folder):
+                item.status = "skipped"
+                item.label = "已有进度或结果，已跳过"
+                item.finished_at = time.time()
+                job.done += 1
+                continue
+
+            item.status = "running"
+            item.started_at = time.time()
+            item.label = "开始分析..."
+            setup_logger(item.folder)
+            jlog = _open_job_log(item.folder, job.engine, job.llm_model)
+            if jlog:
+                jlog.header(
+                    folder=item.folder,
+                    engine=job.engine,
+                    mode=job.mode,
+                    dry_run=False,
+                    prescreen=f"{job.prescreen_enabled}/{job.prescreen_strength}",
+                    skip_duplicate_selection=job.skip_duplicate_selection,
+                    record_preferences=job.record_preferences,
+                    scene_label=job.scene_label,
+                    face_aware=job.face_aware,
+                    llm_model=job.llm_model or "(none)",
+                    threshold_near=job.threshold_near,
+                    threshold_far=job.threshold_far,
+                    near_seconds=job.near_seconds,
+                )
+            try:
+                infos, skipped = grouper.compute_infos(
+                    item.folder,
+                    progress=lambda done, total, label, it=item: _batch_progress(it, done, total, label),
+                    cancel_check=lambda: bool(BATCH_JOB and BATCH_JOB.cancel_requested),
+                    strength=job.prescreen_strength,
+                    face_aware=True if job.engine == "expert" else job.face_aware,
+                    event_cb=None,
+                    engine=job.engine,
+                    llm_model=job.llm_model,
+                    archive_face_classification=True,
+                )
+                if job.cancel_requested:
+                    raise CancelledError()
+                _record_skipped(item.folder, skipped)
+                _save_infos_cache(item.folder, infos)
+                state = build_prescreen_session_from_infos(
+                    item.folder,
+                    dry_run=False,
+                    mode=job.mode,
+                    infos=infos,
+                    threshold_near=job.threshold_near,
+                    threshold_far=job.threshold_far,
+                    near_seconds=job.near_seconds,
+                    prescreen_enabled=True,
+                    prescreen_strength=job.prescreen_strength,
+                    engine=job.engine,
+                    skip_duplicate_selection=job.skip_duplicate_selection,
+                    record_preferences=job.record_preferences,
+                    scene_label=job.scene_label,
+                )
+                state.runtime = job.runtime
+                save_state(state)
+                item.image_count = len(infos)
+                item.rejected_count = len(state.prescreen_rejected)
+                item.skipped_count = len(skipped)
+                item.status = "ready"
+                item.label = (
+                    f"已预跑 {len(infos)} 张，建议放手 {item.rejected_count} 张"
+                )
+                if jlog:
+                    jlog.footer(
+                        status="done(batch)",
+                        extra={
+                            "total_images": len(infos),
+                            "prescreen_rejected": item.rejected_count,
+                            "skipped": len(skipped),
+                        },
+                    )
+            except CancelledError:
+                item.status = "cancelled"
+                item.label = "已取消"
+                if jlog:
+                    jlog.footer(status="cancelled")
+                break
+            except Exception as e:
+                item.status = "error"
+                item.error = str(e)
+                item.label = "预跑失败"
+                logger.exception("batch item error")
+                if jlog:
+                    jlog.footer(status="error", error=str(e))
+            finally:
+                item.finished_at = time.time()
+                _close_job_log()
+                job.done += 1
+
+        if job.cancel_requested:
+            job.status = "cancelled"
+            job.label = "批量预跑已取消"
+        else:
+            job.status = "done"
+            ready = sum(1 for item in job.items if item.status == "ready")
+            failed = sum(1 for item in job.items if item.status == "error")
+            skipped = sum(1 for item in job.items if item.status == "skipped")
+            job.label = f"批量预跑完成：{ready} 个可继续，{failed} 个失败，{skipped} 个跳过"
+    except Exception as e:
+        logger.exception("batch job error")
+        job.status = "error"
+        job.error = str(e)
+        job.label = "批量预跑失败"
+    finally:
+        job.finished_at = time.time()
+
+
 def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
              threshold_near: int, threshold_far: int, near_seconds: int,
              prescreen_enabled: bool, prescreen_strength: str,
@@ -2349,6 +2606,7 @@ def _run_job(folder: str, dry_run: bool, mode: str, wipe_cache: bool,
             raise CancelledError()
         job.skipped = list(skipped)
         _record_skipped(folder, skipped)
+        _save_infos_cache(folder, infos)
 
         if prescreen_enabled:
             rejected, reasons = _prescreen_rejections(infos)
@@ -2690,8 +2948,10 @@ def api_start():
             }), 400
 
     with LOCK:
-        if JOB and JOB.status in ("pending", "scanning", "hashing", "grouping"):
+        if _is_job_running(JOB):
             return jsonify({"error": "已有任务在跑，请稍候"}), 409
+        if _is_batch_running(BATCH_JOB):
+            return jsonify({"error": "批量预跑正在进行，请先等待或中止批量任务"}), 409
 
         _apply_runtime_selection(runtime)
         # 一次性运行：始终全新开始，不读旧 state，不复用缓存。
@@ -2745,6 +3005,128 @@ def api_resume():
         "total_groups": len(sess.groups),
         "finished_groups": sum(1 for g in sess.groups if g.finished),
     })
+
+
+def _batch_status_payload() -> dict:
+    if BATCH_JOB is None:
+        return {"status": "idle"}
+    j = BATCH_JOB
+    elapsed = (j.finished_at or time.time()) - (j.started_at or time.time())
+    return {
+        "status": j.status,
+        "root": j.root,
+        "done": j.done,
+        "total": j.total,
+        "current_index": j.current_index,
+        "label": j.label,
+        "error": j.error,
+        "elapsed": elapsed,
+        "items": [
+            {
+                "folder": item.folder,
+                "name": item.name,
+                "status": item.status,
+                "image_count": item.image_count,
+                "rejected_count": item.rejected_count,
+                "skipped_count": item.skipped_count,
+                "label": item.label,
+                "error": item.error,
+                "elapsed": (item.finished_at or time.time()) - item.started_at
+                if item.started_at else 0,
+                "can_resume": state_path(item.folder).exists(),
+            }
+            for item in j.items
+        ],
+    }
+
+
+@app.route("/api/batch/start", methods=["POST"])
+def api_batch_start():
+    global BATCH_JOB
+    data = request.get_json(force=True) or {}
+    root = (data.get("folder") or data.get("root") or "").strip()
+    if not root:
+        return jsonify({"error": "请填写总文件夹路径"}), 400
+    root = str(Path(root).expanduser().resolve())
+    if not Path(root).is_dir():
+        return jsonify({"error": f"目录不存在: {root}"}), 400
+
+    mode = data.get("mode", "copy")
+    if mode not in ("copy", "move"):
+        mode = "copy"
+    engine = data.get("engine", "fast")
+    if engine not in ("fast", "expert", "tycoon"):
+        engine = "fast"
+    llm_model = (data.get("llm_model") or "").strip() or None
+    if engine == "tycoon" and not llm_model:
+        return jsonify({"error": "土豪模式需要选择 LLM 模型"}), 400
+    if engine == "fast":
+        try:
+            from pic_selecter import vision
+            vision.require_face_capabilities()
+        except Exception as e:
+            return jsonify({
+                "error": (
+                    "极速模式按人脸数量分类需要本地 InsightFace/onnxruntime 可用。"
+                    "请安装视觉依赖，或改用已可用的专家/土豪模式。"
+                    f"（{e}）"
+                )
+            }), 400
+
+    prescreen_strength = data.get("prescreen_strength", "standard")
+    if prescreen_strength == "aggressive":
+        prescreen_strength = "advanced"
+    if prescreen_strength not in ("standard", "advanced"):
+        prescreen_strength = "standard"
+
+    items = _discover_batch_items(root)
+    if not items:
+        return jsonify({"error": "总文件夹下没有找到包含照片的一级子文件夹"}), 400
+
+    with LOCK:
+        if _is_job_running(JOB):
+            return jsonify({"error": "当前单文件夹任务正在运行，请稍后再批量预跑"}), 409
+        if _is_batch_running(BATCH_JOB):
+            return jsonify({"error": "批量预跑已经在运行"}), 409
+        BATCH_JOB = BatchJobState(
+            root=root,
+            status="running",
+            items=items,
+            total=len(items),
+            mode=mode,
+            engine=engine,
+            runtime=_normalize_runtime(data.get("runtime")),
+            threshold_near=int(data.get("threshold_near", THRESHOLD_NEAR)),
+            threshold_far=int(data.get("threshold_far", THRESHOLD_FAR)),
+            near_seconds=int(data.get("near_seconds", NEAR_SECONDS)),
+            prescreen_enabled=True,
+            prescreen_strength=prescreen_strength,
+            skip_duplicate_selection=bool(data.get("skip_duplicate_selection", False)),
+            record_preferences=bool(data.get("record_preferences", True)),
+            scene_label=str(data.get("scene_label") or "").strip()[:80],
+            face_aware=bool(data.get("face_aware", True)),
+            llm_model=llm_model,
+        )
+
+    t = threading.Thread(target=_run_batch_job, daemon=True)
+    t.start()
+    return jsonify({"ok": True, "total": len(items), "items": [asdict(i) for i in items]})
+
+
+@app.route("/api/batch/status")
+def api_batch_status():
+    return jsonify(_batch_status_payload())
+
+
+@app.route("/api/batch/cancel", methods=["POST"])
+def api_batch_cancel():
+    if BATCH_JOB is None:
+        return jsonify({"ok": True, "note": "no active batch"})
+    if BATCH_JOB.status != "running":
+        return jsonify({"ok": True, "note": f"batch already {BATCH_JOB.status}"})
+    BATCH_JOB.cancel_requested = True
+    BATCH_JOB.label = "正在中止批量预跑..."
+    return jsonify({"ok": True})
 
 
 @app.route("/api/reset_session", methods=["POST"])

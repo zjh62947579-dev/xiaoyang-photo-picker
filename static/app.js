@@ -11,7 +11,7 @@ function clearStartError() {
 function showStartError(message) {
   setText("start-error", message || "发生未知错误");
 }
-const VIEWS = ["landing", "processing", "prescreen", "preview", "arena", "done"];
+const VIEWS = ["landing", "batch", "processing", "prescreen", "preview", "arena", "done"];
 const RECENT_KEY = "pic-arena.recent-folders";
 const TUTORIAL_KEY = "pic-arena.tutorial-seen";
 const CONFIRM_MOVE_KEY = "pic-arena.confirmed-move";
@@ -72,6 +72,7 @@ function showView(name, push = true) {
 function updateTitle(view) {
   const map = {
     landing: "小羊帮你筛照片",
+    batch: "批量预跑 · 小羊帮你筛照片",
     processing: "分析中… · 小羊帮你筛照片",
     prescreen: "初筛复核 · 小羊帮你筛照片",
     preview: "分组预览 · 小羊帮你筛照片",
@@ -214,6 +215,7 @@ async function goHome() {
     if (typeof lastSession !== "undefined") lastSession = null;
     // 停掉 job polling（processing 页面用的）
     if (typeof stopJobPolling === "function") stopJobPolling();
+    if (typeof stopBatchPolling === "function") stopBatchPolling();
   } catch (e) {
     console.warn("前端状态清理异常:", e);
   }
@@ -639,42 +641,49 @@ dropZone.addEventListener("drop", (e) => {
   }
 });
 
+function collectRunOptions(forceRestart = false) {
+  const engine = currentEngine();
+  return {
+    folder: $("folder-input").value.trim(),
+    dry_run: false,
+    wipe_cache: true,
+    mode: document.querySelector('input[name="mode"]:checked')?.value || "copy",
+    engine,
+    runtime: currentRuntime(),
+    force_restart: !!forceRestart,
+    threshold_near: parseInt($("thr-near").value),
+    threshold_far: parseInt($("thr-far").value),
+    near_seconds: parseInt($("thr-near-secs").value) * 60,
+    prescreen_enabled: $("opt-prescreen").checked,
+    prescreen_strength: document.querySelector('input[name="prescreen-strength"]:checked')?.value || "standard",
+    skip_duplicate_selection: $("opt-skip-duplicate")?.checked || false,
+    record_preferences: $("opt-record-preferences")?.checked !== false,
+    scene_label: ($("scene-label-input")?.value || "").trim(),
+    face_aware: engine === "expert" && $("opt-face-aware").checked,
+    llm_model: engine === "tycoon" ? ($("llm-model-select")?.value || "") : "",
+  };
+}
+
 async function handleStart(e, options = {}) {
   if (e && e.preventDefault) e.preventDefault();
-  const force_restart = !!options.forceRestart;
-  const folder = $("folder-input").value.trim();
-  const dry_run = false;  // 试运行入口已下线；后端仍兼容此参数
-  // 一次性运行：每次 start 后端都会清掉 winners/losers/state，不再需要这个选项
-  const wipe_cache = true;
-  const mode = document.querySelector('input[name="mode"]:checked')?.value || "copy";
-  const engine = currentEngine();
-  const runtime = currentRuntime();
-  const prescreen_enabled = $("opt-prescreen").checked;
-  const skip_duplicate_selection = $("opt-skip-duplicate")?.checked || false;
-  const record_preferences = $("opt-record-preferences")?.checked !== false;
-  const scene_label = ($("scene-label-input")?.value || "").trim();
-  const prescreen_strength = document.querySelector('input[name="prescreen-strength"]:checked')?.value || "standard";
-  // 极速模式后端会强制忽略 face_aware，这里也明确传 false 避免歧义
-  const face_aware = engine === "expert" && $("opt-face-aware").checked;
-  const threshold_near = parseInt($("thr-near").value);
-  const threshold_far = parseInt($("thr-far").value);
-  const near_seconds = parseInt($("thr-near-secs").value) * 60;
+  const payload = collectRunOptions(!!options.forceRestart);
+  const { folder, mode, engine } = payload;
   clearStartError();
   if (!folder) { showStartError("请填写文件夹路径"); return; }
-  if (!force_restart && lastPeek?.has_prior) {
+  if (!payload.force_restart && lastPeek?.has_prior) {
     showStartError("发现旧进度，请选择“继续上次”或“重新开始”。");
     setStatus("等待选择继续或重新开始", "waiting");
     return;
   }
 
-  if (mode === "move" && !dry_run && !localStorage.getItem(CONFIRM_MOVE_KEY)) {
+  if (mode === "move" && !payload.dry_run && !localStorage.getItem(CONFIRM_MOVE_KEY)) {
     const ok = await confirmDialog(
       "确认移动文件",
       '选择"移动"模式：原文件会被搬到 winners/、losers/ 与 review/。强烈推荐"复制"模式以便反悔。继续？'
     );
     if (!ok) return;
     localStorage.setItem(CONFIRM_MOVE_KEY, "1");
-  } else if (!dry_run && !localStorage.getItem(CONFIRM_REAL_KEY)) {
+  } else if (!payload.dry_run && !localStorage.getItem(CONFIRM_REAL_KEY)) {
     const ok = await confirmDialog(
       "开始处理",
       `将在 ${folder}/winners 与 /losers 创建副本（复制模式）。继续？`
@@ -685,9 +694,7 @@ async function handleStart(e, options = {}) {
 
   $("start-btn").disabled = true;
   try {
-    const llm_model = engine === "tycoon"
-      ? ($("llm-model-select")?.value || "")
-      : "";
+    const llm_model = payload.llm_model;
     if (engine === "tycoon" && !llm_model) {
       setStatus("请先选择一个 LLM 模型再开始", "error");
       $("start-btn").disabled = false;
@@ -695,14 +702,7 @@ async function handleStart(e, options = {}) {
     }
     const r = await fetchJSON("/api/start", {
       method: "POST",
-      body: JSON.stringify({
-        folder, dry_run, wipe_cache, mode, engine, runtime,
-        force_restart,
-        threshold_near, threshold_far, near_seconds,
-        prescreen_enabled, prescreen_strength, skip_duplicate_selection,
-        record_preferences, scene_label, face_aware,
-        llm_model,
-      }),
+      body: JSON.stringify(payload),
     });
     pushRecent(folder);
     if (r && r.resumed) {
@@ -749,6 +749,174 @@ $("btn-force-restart").addEventListener("click", async () => {
   );
   if (!ok) return;
   handleStart(null, { forceRestart: true });
+});
+
+let batchPollHandle = null;
+
+function stopBatchPolling() {
+  if (batchPollHandle) clearInterval(batchPollHandle);
+  batchPollHandle = null;
+}
+
+function enterBatch(root) {
+  showView("batch");
+  $("batch-root").textContent = root || "";
+  $("batch-error").textContent = "";
+  setStatus("批量预跑中", "busy");
+  refreshBatchStatus();
+  stopBatchPolling();
+  batchPollHandle = setInterval(refreshBatchStatus, 1500);
+}
+
+function renderBatchItems(items) {
+  const list = $("batch-list");
+  if (!list) return;
+  list.innerHTML = "";
+  (items || []).forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = `batch-item batch-${item.status || "pending"}`;
+
+    const main = document.createElement("div");
+    main.className = "batch-item-main";
+
+    const title = document.createElement("div");
+    title.className = "batch-item-title";
+    title.textContent = item.name || basename(item.folder);
+
+    const meta = document.createElement("div");
+    meta.className = "batch-item-meta";
+    const bits = [];
+    if (item.image_count) bits.push(`${item.image_count} 张`);
+    if (item.rejected_count) bits.push(`建议放手 ${item.rejected_count} 张`);
+    if (item.skipped_count) bits.push(`跳过 ${item.skipped_count} 张`);
+    if (item.label) bits.push(item.label);
+    if (item.error) bits.push(item.error);
+    meta.textContent = bits.join(" · ") || item.folder;
+    meta.title = item.folder || "";
+
+    main.appendChild(title);
+    main.appendChild(meta);
+
+    const badge = document.createElement("span");
+    badge.className = "batch-item-badge";
+    const labels = {
+      pending: "等待",
+      running: "预跑中",
+      ready: "可继续",
+      skipped: "已跳过",
+      error: "失败",
+      cancelled: "已取消",
+    };
+    badge.textContent = labels[item.status] || item.status || "—";
+
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "btn-ghost batch-resume-btn";
+    action.textContent = "继续处理";
+    action.disabled = !item.can_resume;
+    action.addEventListener("click", () => resumeBatchFolder(item.folder, action));
+
+    row.appendChild(main);
+    row.appendChild(badge);
+    row.appendChild(action);
+    list.appendChild(row);
+  });
+}
+
+async function refreshBatchStatus() {
+  let j;
+  try {
+    j = await fetchJSON("/api/batch/status");
+  } catch (e) {
+    $("batch-error").textContent = "读取批量状态失败：" + e.message;
+    return;
+  }
+  if (j.status === "idle") {
+    stopBatchPolling();
+    showView("landing");
+    return;
+  }
+  $("batch-root").textContent = j.root || "";
+  const items = j.items || [];
+  const ready = items.filter((it) => it.status === "ready").length;
+  const errors = items.filter((it) => it.status === "error").length;
+  $("batch-done").textContent = (j.done || 0).toLocaleString();
+  $("batch-total").textContent = (j.total || items.length || 0).toLocaleString();
+  $("batch-ready").textContent = ready.toLocaleString();
+  $("batch-error-count").textContent = errors.toLocaleString();
+  const total = j.total || items.length || 0;
+  const pct = total ? Math.min(100, Math.round((j.done || 0) / total * 100)) : 0;
+  $("batch-progress-fill").style.width = pct + "%";
+  $("batch-progress-count").textContent = `${j.done || 0} / ${total}`;
+  $("batch-progress-pct").textContent = pct + "%";
+  $("batch-label").textContent = j.label || "";
+  $("batch-error").textContent = j.error ? `处理失败：${j.error}` : "";
+  renderBatchItems(items);
+
+  if (j.status === "running") {
+    setStatus(`批量预跑中 · ${j.done || 0} / ${total}`, "busy");
+  } else if (j.status === "done") {
+    stopBatchPolling();
+    setStatus(`批量完成 · ${ready} 个可继续`, errors ? "waiting" : "done");
+  } else if (j.status === "cancelled") {
+    stopBatchPolling();
+    setStatus("批量已中止", "idle");
+  } else if (j.status === "error") {
+    stopBatchPolling();
+    setStatus("批量失败", "error");
+  }
+}
+
+async function resumeBatchFolder(folder, btn) {
+  if (!folder) return;
+  if (btn) { btn.disabled = true; btn.textContent = "打开中…"; }
+  try {
+    await fetchJSON("/api/resume", {
+      method: "POST",
+      body: JSON.stringify({ folder }),
+    });
+    pushRecent(folder);
+    stopBatchPolling();
+    await bootstrap();
+  } catch (e) {
+    toast("继续处理失败：" + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = "继续处理"; }
+  }
+}
+
+async function startBatch() {
+  const payload = collectRunOptions(false);
+  if (!payload.folder) { showStartError("请填写总文件夹路径"); return; }
+  if (payload.engine === "tycoon" && !payload.llm_model) {
+    showStartError("土豪模式需要先选择一个 LLM 模型");
+    return;
+  }
+  const ok = await confirmDialog(
+    "批量预跑总文件夹",
+    "会把总文件夹下每个一级子文件夹当作一个独立路线预先分析并保存进度。不会自动移动照片；第二天你可以逐个继续处理。开始？"
+  );
+  if (!ok) return;
+  const btn = $("btn-start-batch");
+  btn.disabled = true;
+  clearStartError();
+  try {
+    await fetchJSON("/api/batch/start", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    enterBatch(payload.folder);
+  } catch (e) {
+    showStartError(e.message);
+    setStatus("批量启动失败", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("btn-start-batch")?.addEventListener("click", startBatch);
+$("btn-batch-cancel")?.addEventListener("click", async () => {
+  try { await fetchJSON("/api/batch/cancel", { method: "POST" }); }
+  catch (e) { toast("中止失败：" + e.message); }
 });
 
 $("browse-btn").addEventListener("click", async () => {
@@ -2705,6 +2873,13 @@ async function bootstrap() {
     const j = await fetchJSON("/api/job");
     if (j.status && j.status !== "idle" && j.status !== "done" && j.status !== "error" && j.status !== "cancelled") {
       enterProcessing(j.folder || "");
+      return;
+    }
+  } catch {}
+  try {
+    const b = await fetchJSON("/api/batch/status");
+    if (b.status && b.status !== "idle") {
+      enterBatch(b.root || "");
       return;
     }
   } catch {}

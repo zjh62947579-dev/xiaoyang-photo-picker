@@ -522,3 +522,98 @@ def test_start_requires_explicit_force_restart_when_prior_state_exists(tmp_path)
 
     assert resp.status_code == 409
     assert resp.get_json()["has_prior"] is True
+
+
+def test_infos_cache_allows_confirm_after_resume(tmp_path):
+    app = import_app_module()
+    one = make_info(tmp_path / "one.jpg", score=80)
+    two = make_info(tmp_path / "two.jpg", score=82)
+    app.SESSION = app.build_prescreen_session_from_infos(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        infos=[one, two],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=True,
+        prescreen_strength="standard",
+    )
+    app._save_infos_cache(str(tmp_path), [one, two])
+    app.SESSION = None
+    app.LAST_INFOS = None
+
+    client = app.app.test_client()
+    resume = client.post(
+        "/api/resume",
+        json={"folder": str(tmp_path)},
+        headers=LOCAL_HEADERS,
+    )
+    confirmed = client.post("/api/confirm_prescreen", headers=LOCAL_HEADERS)
+
+    assert resume.status_code == 200
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["async"] is True
+
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        progress = client.get("/api/grouping_progress", headers=LOCAL_HEADERS).get_json()
+        if progress["status"] == "done":
+            break
+        time.sleep(0.05)
+
+    assert app.SESSION is not None
+    assert app.SESSION.prescreen_reviewed is True
+    assert len(app.SESSION.groups) >= 1
+
+
+def test_batch_start_preruns_child_folders_and_saves_resumable_states(tmp_path, monkeypatch):
+    app = import_app_module()
+    route_a = tmp_path / "路线A"
+    route_b = tmp_path / "路线B"
+    (route_a / "nested").mkdir(parents=True)
+    route_b.mkdir()
+    (route_a / "nested" / "a.jpg").write_bytes(b"fake")
+    (route_b / "b.jpg").write_bytes(b"fake")
+
+    monkeypatch.setattr(app, "_require_engine", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "setup_logger", lambda folder=None: None)
+
+    def fake_compute_infos(folder, **kwargs):
+        p = Path(folder)
+        photo = next(p.rglob("*.jpg"))
+        return [app.ImageInfo(
+            path=str(photo),
+            phash="0" * 16,
+            size=photo.stat().st_size,
+            mtime=photo.stat().st_mtime,
+            exif_summary={"width": 1000, "height": 800, "file_size": photo.stat().st_size},
+            quality={"quality_score": 80, "face_count": 0},
+        )], []
+
+    monkeypatch.setattr(app.grouper, "compute_infos", fake_compute_infos)
+
+    client = app.app.test_client()
+    resp = client.post(
+        "/api/batch/start",
+        json={"folder": str(tmp_path), "engine": "expert", "mode": "copy"},
+        headers=LOCAL_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    deadline = time.time() + 3
+    status = None
+    while time.time() < deadline:
+        status = client.get("/api/batch/status", headers=LOCAL_HEADERS).get_json()
+        if status["status"] == "done":
+            break
+        time.sleep(0.05)
+
+    assert status is not None
+    assert status["status"] == "done"
+    assert status["total"] == 2
+    assert all(item["status"] == "ready" for item in status["items"])
+    assert app.state_path(str(route_a)).exists()
+    assert app.state_path(str(route_b)).exists()
+    assert app.infos_cache_path(str(route_a)).exists()
+    assert app.infos_cache_path(str(route_b)).exists()
