@@ -31,6 +31,8 @@ set "PIANKE_RUNTIME_DIR=%LAUNCHER_BASE%"
 set "UV_CACHE_DIR=%LAUNCHER_BASE%\.uv-cache"
 set "UV_PYTHON_INSTALL_DIR=%LAUNCHER_BASE%\.uv-python"
 set "PIP_CACHE_DIR=%LAUNCHER_BASE%\.pip-cache"
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 
 echo.
 echo ============================================================

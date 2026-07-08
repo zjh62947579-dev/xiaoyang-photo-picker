@@ -228,6 +228,21 @@ def state_path(folder: str) -> Path:
 logger = logging.getLogger("pic_selecter")
 
 
+def _configure_text_encoding() -> None:
+    """Keep Windows consoles from failing on Chinese paths or emoji."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_configure_text_encoding()
+
+
 # ---------------- 火山引擎 API Key 持久化 ----------------
 #
 # 限制：Python 子进程没法回写父 shell 的环境变量（OS 决定的）。
@@ -276,6 +291,7 @@ _load_ark_key_from_file()
 
 def setup_logger(folder: Optional[str]) -> None:
     """配置 rotating log handler。folder 变化时移除旧 handler，避免重复。"""
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
     for h in list(logger.handlers):
         logger.removeHandler(h)
     logger.setLevel(logging.INFO)

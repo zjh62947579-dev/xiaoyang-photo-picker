@@ -756,6 +756,8 @@ def run_app(port: int) -> int:
     print("=" * 56)
     print()
     env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     if USE_MIRROR:
         # 让 transformers / huggingface_hub 走国内镜像
         env.setdefault("HF_ENDPOINT", HF_MIRROR)
