@@ -473,6 +473,30 @@ def test_resume_restores_saved_session_and_meta(tmp_path):
     assert app.SESSION.groups[0].left == sess.groups[0].left
 
 
+def test_state_save_load_uses_utf8_for_non_gbk_text(tmp_path):
+    app = import_app_module()
+    one = make_info(tmp_path / "emoji.jpg", score=80)
+    sess = app.build_session_from_groups(
+        str(tmp_path),
+        dry_run=True,
+        mode="copy",
+        raw_groups=[[one]],
+        infos=[one],
+        threshold_near=10,
+        threshold_far=6,
+        near_seconds=300,
+        prescreen_enabled=False,
+        prescreen_strength="standard",
+        scene_label="旅行🚣",
+    )
+
+    app.save_state(sess)
+    loaded = app.load_state(str(tmp_path))
+
+    assert loaded is not None
+    assert loaded.scene_label == "旅行🚣"
+
+
 def test_start_requires_explicit_force_restart_when_prior_state_exists(tmp_path):
     app = import_app_module()
     one = make_info(tmp_path / "one.jpg", score=80)
