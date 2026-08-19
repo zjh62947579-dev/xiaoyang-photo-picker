@@ -11,12 +11,14 @@ function clearStartError() {
 function showStartError(message) {
   setText("start-error", message || "发生未知错误");
 }
-const VIEWS = ["landing", "batch", "processing", "prescreen", "preview", "arena", "done"];
+const VIEWS = ["landing", "batch", "video", "processing", "prescreen", "preview", "arena", "done"];
 const RECENT_KEY = "pic-arena.recent-folders";
 const TUTORIAL_KEY = "pic-arena.tutorial-seen";
 const CONFIRM_MOVE_KEY = "pic-arena.confirmed-move";
 const CONFIRM_REAL_KEY = "pic-arena.confirmed-real";
 const RUNTIME_KEY = "pic_selecter.runtime";
+const TOOL_KEY = "pic_selecter.active_tool";
+const CONFIRM_VIDEO_MOVE_KEY = "pic_selecter.confirmed_video_move";
 const VERDICT_HOLD_MS = 380;
 
 let busy = false;
@@ -26,6 +28,9 @@ let currentGroup = null;
 let currentMode = "move";
 let recentWinners = []; // 最近胜出路径，给 arena-stack 用
 let streamSeq = 0;       // streaming log 已渲染到的 event_seq
+let activeTool = "photo";
+let videoJobKind = "single";
+let videoPollHandle = null;
 
 // ---- 处理页照片墙 ----
 let wallCells = [];          // [{el, ev, addedAt}]
@@ -71,8 +76,9 @@ function showView(name, push = true) {
 }
 function updateTitle(view) {
   const map = {
-    landing: "小羊帮你筛照片",
+    landing: "小羊新媒体工具箱",
     batch: "批量预跑 · 小羊帮你筛照片",
+    video: "视频分类 · 小羊新媒体工具箱",
     processing: "分析中… · 小羊帮你筛照片",
     prescreen: "初筛复核 · 小羊帮你筛照片",
     preview: "分组预览 · 小羊帮你筛照片",
@@ -195,7 +201,7 @@ async function goHome() {
   if (!onLanding) {
     const ok = await confirmDialog(
       "回到主页？",
-      "当前任务会被取消，已选文件夹和未保存进度会清空。\n（winners/ losers/ 文件夹里已搬过去的图片不会动）"
+      "当前任务会停止，已经完成归档的照片或视频不会被撤回；下次重新启动可继续处理剩余文件。"
     );
     if (!ok) return;
   }
@@ -209,13 +215,18 @@ async function goHome() {
   try {
     const fi = $("folder-input");
     if (fi) fi.value = "";
+    const vfi = $("video-folder-input");
+    if (vfi) vfi.value = "";
     $("folder-snapshot")?.classList.add("hidden");
+    if ($("video-folder-peek")) $("video-folder-peek").hidden = true;
+    setText("video-error", "");
     // 重置全局变量（防御性）
     if (typeof currentGroup !== "undefined") currentGroup = null;
     if (typeof lastSession !== "undefined") lastSession = null;
     // 停掉 job polling（processing 页面用的）
     if (typeof stopJobPolling === "function") stopJobPolling();
     if (typeof stopBatchPolling === "function") stopBatchPolling();
+    if (typeof stopVideoPolling === "function") stopVideoPolling();
   } catch (e) {
     console.warn("前端状态清理异常:", e);
   }
@@ -229,6 +240,32 @@ document.querySelectorAll(".btn-go-home").forEach(el => el.addEventListener("cli
 // =================================================================
 // 着陆页
 // =================================================================
+function selectLandingTool(tool, persist = true) {
+  activeTool = tool === "video" ? "video" : "photo";
+  const photoActive = activeTool === "photo";
+  const photoTab = $("tool-photo-tab");
+  const videoTab = $("tool-video-tab");
+  const photoPanel = $("photo-tool-panel");
+  const videoPanel = $("video-tool-panel");
+  photoTab?.classList.toggle("is-active", photoActive);
+  videoTab?.classList.toggle("is-active", !photoActive);
+  photoTab?.setAttribute("aria-selected", String(photoActive));
+  videoTab?.setAttribute("aria-selected", String(!photoActive));
+  if (photoPanel) photoPanel.hidden = !photoActive;
+  if (videoPanel) videoPanel.hidden = photoActive;
+  setText("landing-formats", photoActive
+    ? "JPG · PNG · HEIC · WEBP · TIFF · RAW"
+    : "MP4 · MOV · MKV · AVI · MTS · WEBM");
+  clearStartError();
+  setText("video-error", "");
+  setStatus(photoActive ? "照片引擎就绪" : "视频分类引擎就绪", "idle");
+  if (persist) localStorage.setItem(TOOL_KEY, activeTool);
+}
+
+$("tool-photo-tab")?.addEventListener("click", () => selectLandingTool("photo"));
+$("tool-video-tab")?.addEventListener("click", () => selectLandingTool("video"));
+selectLandingTool(localStorage.getItem(TOOL_KEY) || "photo", false);
+
 function loadRecent() {
   try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"); }
   catch { return []; }
@@ -537,6 +574,14 @@ restoreRuntimeChoice();
         if (label) label.textContent = "人脸感知（未安装 insightface，请 pip install insightface onnxruntime）";
         faceOpt.parentElement?.classList.add("is-disabled");
       }
+    }
+    if (!cap.video_person_detection) {
+      const message = "视频分类缺少 torch / torchvision，请先运行最新版启动器补齐依赖。";
+      const videoStart = $("video-start-btn");
+      const videoBatch = $("video-batch-btn");
+      if (videoStart) { videoStart.disabled = true; videoStart.title = message; }
+      if (videoBatch) { videoBatch.disabled = true; videoBatch.title = message; }
+      setText("video-error", message);
     }
   } catch {}
 })();
@@ -938,6 +983,321 @@ $("browse-btn").addEventListener("click", async () => {
 });
 $("folder-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); handleStart(e); }
+});
+
+// =================================================================
+// 视频分类：单文件夹 + 总文件夹批量
+// =================================================================
+function currentVideoMode() {
+  return document.querySelector('input[name="video-mode"]:checked')?.value || "move";
+}
+
+function syncVideoModeOptions() {
+  document.querySelectorAll(".video-mode-option").forEach((label) => {
+    const input = label.querySelector('input[type="radio"]');
+    label.classList.toggle("is-active", !!input?.checked);
+  });
+}
+document.querySelectorAll('input[name="video-mode"]').forEach((input) => {
+  input.addEventListener("change", syncVideoModeOptions);
+});
+syncVideoModeOptions();
+
+let videoPeekTimer = null;
+async function peekVideoFolder(folder) {
+  clearTimeout(videoPeekTimer);
+  const peek = $("video-folder-peek");
+  if (!folder) {
+    if (peek) peek.hidden = true;
+    return;
+  }
+  videoPeekTimer = setTimeout(async () => {
+    try {
+      const data = await fetchJSON("/api/video/peek", {
+        method: "POST",
+        body: JSON.stringify({ folder }),
+      });
+      setText("video-peek-count", (data.count || 0).toLocaleString());
+      setText("video-peek-batch", data.batch_folders
+        ? `${data.batch_folders} 个一级子文件夹 · 共 ${data.batch_videos} 个视频`
+        : "当前文件夹可直接分类");
+      if (peek) peek.hidden = false;
+      setText("video-error", data.count || data.batch_videos ? "" : "没有找到可处理的视频");
+    } catch (e) {
+      if (peek) peek.hidden = true;
+    }
+  }, 220);
+}
+
+$("video-folder-input")?.addEventListener("input", (e) => {
+  peekVideoFolder(e.target.value.trim());
+});
+$("video-folder-input")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); startVideoClassification(false); }
+});
+
+const videoDrop = $("video-folder-drop");
+if (videoDrop) {
+  ["dragover", "dragenter"].forEach((name) => videoDrop.addEventListener(name, (e) => {
+    e.preventDefault();
+    videoDrop.classList.add("drag-over");
+  }));
+  ["dragleave", "drop"].forEach((name) => videoDrop.addEventListener(name, (e) => {
+    e.preventDefault();
+    videoDrop.classList.remove("drag-over");
+  }));
+  videoDrop.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files?.[0];
+    if (file?.path) {
+      $("video-folder-input").value = file.path;
+      peekVideoFolder(file.path);
+    } else {
+      toast("浏览器无法直接获取文件夹路径，请粘贴绝对路径");
+    }
+  });
+}
+
+$("video-browse-btn")?.addEventListener("click", async () => {
+  const button = $("video-browse-btn");
+  button.disabled = true;
+  try {
+    const data = await fetchJSON("/api/browse_folder", {
+      method: "POST",
+      body: JSON.stringify({ kind: "video" }),
+    });
+    if (data.folder) {
+      $("video-folder-input").value = data.folder;
+      peekVideoFolder(data.folder);
+      setText("video-error", "");
+    }
+  } catch (e) {
+    setText("video-error", e.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function stopVideoPolling() {
+  if (videoPollHandle) clearInterval(videoPollHandle);
+  videoPollHandle = null;
+}
+
+function enterVideoJob(kind, folder) {
+  videoJobKind = kind === "batch" ? "batch" : "single";
+  showView("video");
+  window.scrollTo(0, 0);
+  setText("video-job-folder", folder);
+  setText("video-job-eyebrow", videoJobKind === "batch" ? "批量视频分类" : "视频分类中");
+  setText("video-job-title", videoJobKind === "batch" ? "正在逐个整理路线文件夹" : "正在整理视频素材");
+  setText("video-total-label", videoJobKind === "batch" ? "路线文件夹" : "总视频");
+  setText("video-result-title", videoJobKind === "batch" ? "路线进度" : "最近完成");
+  setText("video-result-note", videoJobKind === "batch" ? "每个一级子文件夹独立归档" : "抽样识别，不上传视频");
+  $("btn-video-open").disabled = true;
+  $("btn-video-cancel").disabled = false;
+  setText("video-job-error", "");
+  stopVideoPolling();
+  refreshVideoStatus();
+  videoPollHandle = setInterval(refreshVideoStatus, 1000);
+  setStatus(videoJobKind === "batch" ? "批量视频分类中" : "视频分类中", "busy");
+}
+
+function renderSingleVideoItems(items, mode) {
+  const list = $("video-result-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const recent = [...(items || [])].reverse();
+  if (!recent.length) {
+    const empty = document.createElement("div");
+    empty.className = "video-result-empty";
+    empty.textContent = "识别结果会在这里逐条出现。";
+    list.appendChild(empty);
+    return;
+  }
+  recent.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `video-result-row ${item.status === "error" ? "is-error" : ""}`;
+
+    const name = document.createElement("div");
+    name.className = "video-result-name";
+    name.textContent = item.name || basename(item.source);
+    name.title = item.source || "";
+
+    const category = document.createElement("div");
+    category.className = "video-result-category";
+    category.textContent = item.error ? "未分类" : `${item.orientation} · ${item.content}`;
+
+    const score = document.createElement("div");
+    score.className = "video-result-score";
+    score.textContent = item.error
+      ? item.error
+      : (item.content === "人像" ? `人物 ${Math.round((item.person_score || 0) * 100)}%` : "未检出人物");
+    score.title = item.error || "";
+
+    const status = document.createElement("div");
+    status.className = "video-result-status";
+    const statusLabels = {
+      processed: mode === "move" ? "已移动" : "已复制",
+      skipped: "已完成",
+      error: "失败 · 原位保留",
+    };
+    status.textContent = statusLabels[item.status] || item.status || "";
+
+    row.append(name, category, score, status);
+    list.appendChild(row);
+  });
+}
+
+function renderVideoBatchItems(items) {
+  const list = $("video-result-list");
+  if (!list) return;
+  list.innerHTML = "";
+  (items || []).forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `video-result-row is-batch ${item.status === "error" ? "is-error" : ""}`;
+
+    const name = document.createElement("div");
+    name.className = "video-result-name";
+    name.textContent = item.name || basename(item.folder);
+    name.title = item.folder || "";
+
+    const state = document.createElement("div");
+    state.className = "video-result-category";
+    const labels = { pending: "等待", running: "处理中", done: "完成", error: "失败", cancelled: "已取消" };
+    state.textContent = labels[item.status] || item.status || "等待";
+
+    const counts = document.createElement("div");
+    counts.className = "video-batch-counts";
+    counts.textContent = `新处理 ${item.processed || 0} · 已完成 ${item.skipped || 0} · 失败 ${item.failed || 0}`;
+
+    const progress = document.createElement("div");
+    progress.className = "video-result-status";
+    progress.textContent = `${item.done || 0} / ${item.video_count || 0}`;
+    progress.title = item.error || item.label || "";
+
+    row.append(name, state, counts, progress);
+    list.appendChild(row);
+  });
+}
+
+async function refreshVideoStatus() {
+  const endpoint = videoJobKind === "batch" ? "/api/video/batch/status" : "/api/video/status";
+  let job;
+  try {
+    job = await fetchJSON(endpoint);
+  } catch (e) {
+    setText("video-job-error", `读取进度失败：${e.message}`);
+    return;
+  }
+  if (job.status === "idle") {
+    stopVideoPolling();
+    showView("landing");
+    selectLandingTool("video", false);
+    return;
+  }
+
+  const done = job.done || 0;
+  const total = job.total || 0;
+  const percent = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+  setText("video-job-folder", job.folder || job.root || "");
+  setText("video-job-done", done.toLocaleString());
+  setText("video-job-total", total.toLocaleString());
+  setText("video-job-failed", (job.failed || 0).toLocaleString());
+  setText("video-progress-count", `${done} / ${total}`);
+  setText("video-progress-pct", `${percent}%`);
+  $("video-progress-fill").style.width = `${percent}%`;
+  setText("video-job-label", job.label || "");
+  setText("video-job-error", job.error ? `处理失败：${job.error}` : "");
+
+  const categories = job.categories || {};
+  setText("video-count-landscape-scenery", (categories["横屏/风景"] || 0).toLocaleString());
+  setText("video-count-landscape-people", (categories["横屏/人像"] || 0).toLocaleString());
+  setText("video-count-portrait-scenery", (categories["竖屏/风景"] || 0).toLocaleString());
+  setText("video-count-portrait-people", (categories["竖屏/人像"] || 0).toLocaleString());
+
+  if (videoJobKind === "batch") renderVideoBatchItems(job.items || []);
+  else renderSingleVideoItems(job.items || [], job.mode);
+
+  const active = ["pending", "checking", "running"].includes(job.status);
+  $("btn-video-cancel").disabled = !active;
+  $("btn-video-open").disabled = active || job.status === "error";
+  if (active) {
+    const prefix = job.status === "checking" ? "准备视频模型" : "视频分类中";
+    setStatus(`${prefix} · ${done} / ${total}`, "busy");
+  } else {
+    stopVideoPolling();
+    if (job.status === "done") setStatus("视频分类完成", job.failed ? "waiting" : "done");
+    else if (job.status === "cancelled") setStatus("视频分类已中止，可续跑", "idle");
+    else setStatus("视频分类失败", "error");
+  }
+}
+
+async function startVideoClassification(batch) {
+  const folder = $("video-folder-input")?.value.trim() || "";
+  const mode = currentVideoMode();
+  setText("video-error", "");
+  if (!folder) {
+    setText("video-error", batch ? "请填写包含多个路线文件夹的总目录" : "请填写视频文件夹路径");
+    return;
+  }
+
+  if (mode === "move" && !localStorage.getItem(CONFIRM_VIDEO_MOVE_KEY)) {
+    const ok = await confirmDialog(
+      batch ? "批量移动并分类视频？" : "移动并分类视频？",
+      batch
+        ? "每个一级子文件夹里的视频会移动到各自的“视频分类/横屏或竖屏/风景或人像”。中断后可重新启动继续。"
+        : "视频会移动到当前目录下的“视频分类/横屏或竖屏/风景或人像”。无法读取的文件会留在原位置。"
+    );
+    if (!ok) return;
+    localStorage.setItem(CONFIRM_VIDEO_MOVE_KEY, "1");
+  } else if (mode === "copy") {
+    const ok = await confirmDialog(
+      batch ? "批量复制并分类视频？" : "复制并分类视频？",
+      "原视频会保留，但分类结果会额外占用接近相同的磁盘空间。确认继续？"
+    );
+    if (!ok) return;
+  }
+
+  const button = batch ? $("video-batch-btn") : $("video-start-btn");
+  button.disabled = true;
+  try {
+    const endpoint = batch ? "/api/video/batch/start" : "/api/video/start";
+    await fetchJSON(endpoint, {
+      method: "POST",
+      body: JSON.stringify({ folder, mode, runtime: currentRuntime() }),
+    });
+    enterVideoJob(batch ? "batch" : "single", folder);
+  } catch (e) {
+    setText("video-error", e.message);
+    setStatus("视频分类启动失败", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("video-start-btn")?.addEventListener("click", () => startVideoClassification(false));
+$("video-form")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  startVideoClassification(false);
+});
+$("video-batch-btn")?.addEventListener("click", () => startVideoClassification(true));
+$("btn-video-cancel")?.addEventListener("click", async () => {
+  const endpoint = videoJobKind === "batch" ? "/api/video/batch/cancel" : "/api/video/cancel";
+  try {
+    await fetchJSON(endpoint, { method: "POST" });
+    setText("video-job-label", "正在中止，当前视频处理完后停止...");
+  } catch (e) {
+    toast(`中止失败：${e.message}`);
+  }
+});
+$("btn-video-open")?.addEventListener("click", async () => {
+  try {
+    await fetchJSON("/api/video/open", {
+      method: "POST",
+      body: JSON.stringify({ kind: videoJobKind }),
+    });
+  } catch (e) {
+    toast(`打开失败：${e.message}`);
+  }
 });
 
 // =================================================================

@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>小羊帮你筛照片 — 决定性的那一张</title>
+<title>小羊新媒体工具箱</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23cc785c'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=20260517f">
+<link rel="stylesheet" href="/static/style.css?v=20260819a">
 </head>
 <body>
 
@@ -22,12 +22,24 @@
     <header class="site-header">
       <div class="brand">
         <span class="brand-mark"></span>
-        <span class="brand-name">小羊帮你筛照片</span>
+        <span class="brand-name">小羊新媒体工具箱</span>
       </div>
-      <span class="site-tag">本地运行 · 不上传</span>
+      <span class="site-tag">照片筛选 · 视频分类 · 本地运行</span>
     </header>
 
     <main class="landing-main">
+      <div class="tool-switch" role="tablist" aria-label="选择工具">
+        <button type="button" id="tool-photo-tab" class="tool-tab is-active" role="tab" aria-selected="true" aria-controls="photo-tool-panel">
+          <span class="tool-tab-index">01</span>
+          <span>照片筛选</span>
+        </button>
+        <button type="button" id="tool-video-tab" class="tool-tab" role="tab" aria-selected="false" aria-controls="video-tool-panel">
+          <span class="tool-tab-index">02</span>
+          <span>视频分类</span>
+        </button>
+      </div>
+
+      <div id="photo-tool-panel" class="tool-panel" role="tabpanel" aria-labelledby="tool-photo-tab">
       <p class="eyebrow">小羊先帮你过一遍</p>
       <h1 class="hero-title">让小羊替你筛一轮，<br>由你留下最好的<em>那张</em>。</h1>
       <p class="hero-sub">先按相似度自动成组、淘汰明显失败片，<br>剩下的照片再交给你做最后决定。</p>
@@ -250,12 +262,67 @@
           <div class="meta-text"><strong>选片</strong><br>左右擂台 · 键盘 · 同步缩放</div>
         </div>
       </div>
+      </div>
+
+      <div id="video-tool-panel" class="tool-panel" role="tabpanel" aria-labelledby="tool-video-tab" hidden>
+        <p class="eyebrow">新媒体素材整理</p>
+        <h1 class="hero-title video-hero-title">横竖先归位，<br>再把<em>人物</em>找出来。</h1>
+        <p class="hero-sub">抽取视频多个时间点识别人像，自动整理为横屏 / 竖屏与风景 / 人像四类。</p>
+
+        <form id="video-form" class="start-form video-form" autocomplete="off" action="javascript:void(0)" onsubmit="return false">
+          <label class="field-label" for="video-folder-input">视频文件夹</label>
+          <div class="field-row" id="video-folder-drop">
+            <button type="button" id="video-browse-btn" class="btn-ghost btn-browse" title="打开系统选择对话框">
+              选择文件夹
+            </button>
+            <input
+              type="text"
+              id="video-folder-input"
+              placeholder="或粘贴 / 拖入路径"
+              spellcheck="false"
+              autocapitalize="off"
+              required
+            >
+            <button type="button" id="video-start-btn" class="btn btn-primary">
+              开始分类
+            </button>
+          </div>
+
+          <div id="video-folder-peek" class="video-folder-peek" hidden>
+            <span><strong id="video-peek-count">0</strong> 个视频</span>
+            <span id="video-peek-batch">—</span>
+          </div>
+
+          <div class="video-options" aria-label="视频归档方式">
+            <span class="video-options-label">归档方式</span>
+            <label class="video-mode-option is-active">
+              <input type="radio" name="video-mode" value="move" checked>
+              <span><strong>移动</strong> · 不额外占用一份视频空间</span>
+            </label>
+            <label class="video-mode-option">
+              <input type="radio" name="video-mode" value="copy">
+              <span><strong>复制</strong> · 原视频留在原位置</span>
+            </label>
+          </div>
+
+          <div class="batch-entry video-batch-entry">
+            <button type="button" id="video-batch-btn" class="btn-ghost">批量分类总文件夹</button>
+            <span>每个一级子文件夹独立生成自己的“视频分类”目录。</span>
+          </div>
+          <p id="video-error" class="form-error"></p>
+        </form>
+
+        <div class="video-output-map" aria-label="视频分类目录结构">
+          <div><span>横屏</span><strong>风景</strong><strong>人像</strong></div>
+          <div><span>竖屏</span><strong>风景</strong><strong>人像</strong></div>
+        </div>
+      </div>
     </main>
 
     <footer class="landing-foot">
       <div class="landing-foot-row">
-        <span>本地运行 · 不上传照片</span>
-        <span>JPG · PNG · HEIC · WEBP · TIFF · RAW</span>
+        <span>本地运行 · 不上传素材</span>
+        <span id="landing-formats">JPG · PNG · HEIC · WEBP · TIFF · RAW</span>
       </div>
       <div class="landing-foot-row landing-foot-license">
         <button type="button" class="about-trigger" id="about-trigger" aria-expanded="false" aria-controls="about-popover" title="关于">
@@ -312,6 +379,92 @@
     <p id="batch-error" class="form-error center"></p>
 
     <div id="batch-list" class="batch-list"></div>
+  </main>
+</section>
+
+<!-- ============ 视频分类进度页 ============ -->
+<section id="view-video" class="view">
+  <div class="grain"></div>
+  <header class="preview-header">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-tiny">小羊新媒体工具箱 · 视频分类</span>
+    </div>
+    <div class="header-actions">
+      <button id="btn-video-open" class="btn-ghost video-header-btn" aria-label="打开分类文件夹" title="打开分类文件夹" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3 6.5h6l2 2h10v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+          <path d="M3 8.5V6a2 2 0 0 1 2-2h4l2 2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        <span>打开分类文件夹</span>
+      </button>
+      <button id="btn-video-cancel" class="btn-ghost video-header-btn" aria-label="中止分类" title="中止分类">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" rx="1" stroke="currentColor" stroke-width="2"/>
+        </svg>
+        <span>中止分类</span>
+      </button>
+      <button class="btn-ghost btn-go-home video-header-btn" aria-label="回到主页" title="回到主页">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3 12L12 4L21 12M5 10V20H10V14H14V20H19V10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>回主页</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="video-job-shell">
+    <div class="video-job-heading">
+      <div>
+        <p class="eyebrow" id="video-job-eyebrow">视频分类中</p>
+        <h2 class="preview-title" id="video-job-title">正在整理视频素材</h2>
+        <p class="preview-sub" id="video-job-folder">—</p>
+      </div>
+      <div class="video-job-totals">
+        <div><strong id="video-job-done">0</strong><span>已处理</span></div>
+        <div><strong id="video-job-total">0</strong><span id="video-total-label">总视频</span></div>
+        <div><strong id="video-job-failed">0</strong><span>失败</span></div>
+      </div>
+    </div>
+
+    <div class="video-category-grid">
+      <div class="video-category-cell landscape">
+        <span class="video-category-axis">横屏</span>
+        <strong id="video-count-landscape-scenery">0</strong>
+        <span>风景</span>
+      </div>
+      <div class="video-category-cell landscape people">
+        <span class="video-category-axis">横屏</span>
+        <strong id="video-count-landscape-people">0</strong>
+        <span>人像</span>
+      </div>
+      <div class="video-category-cell portrait">
+        <span class="video-category-axis">竖屏</span>
+        <strong id="video-count-portrait-scenery">0</strong>
+        <span>风景</span>
+      </div>
+      <div class="video-category-cell portrait people">
+        <span class="video-category-axis">竖屏</span>
+        <strong id="video-count-portrait-people">0</strong>
+        <span>人像</span>
+      </div>
+    </div>
+
+    <div class="progress video-progress">
+      <div class="progress-bar"><div id="video-progress-fill" class="progress-fill"></div></div>
+      <div class="progress-meta">
+        <span id="video-progress-count">0 / 0</span>
+        <span id="video-progress-pct">0%</span>
+      </div>
+    </div>
+    <p id="video-job-label" class="proc-label">准备中</p>
+    <p id="video-job-error" class="form-error"></p>
+
+    <div class="video-result-head">
+      <span id="video-result-title">最近完成</span>
+      <span id="video-result-note">抽样识别，不上传视频</span>
+    </div>
+    <div id="video-result-list" class="video-result-list"></div>
   </main>
 </section>
 
@@ -850,6 +1003,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20260517f"></script>
+<script src="/static/app.js?v=20260819a"></script>
 </body>
 </html>
