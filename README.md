@@ -73,7 +73,7 @@
 
 *注：启动器会自动在项目独立目录下下载并构建 Python 3.11 环境，不污染你的系统环境。国内用户默认启用 PyPI 和模型镜像，可以使用环境变量 `PIANKE_NO_MIRROR=1` 禁用镜像走官方源。*
 
-Windows 启动器会优先使用本机已有的 Python 3.11；如果没有，再尝试 `uv`，之后依次尝试 `winget` 和 python.org 官方安装包安装 Python 3.11。自动下载、Python 运行时、`.venv` 依赖环境和安装缓存会放到当前盘符根目录的 `xiaoyang-photo-picker-runtime`；若项目在 C 盘，会优先改用 `D:\xiaoyang-photo-picker-runtime`，没有 D 盘时尝试 E 盘。也可以提前设置 `PIANKE_RUNTIME_DIR=E:\xiaoyang-photo-picker-runtime` 手动指定位置。网络受限的电脑也可以先手动安装 Python 3.11，再重新双击启动器。
+Windows 启动器会优先使用本机已有的 Python 3.11；如果没有，再尝试 `uv`，之后依次尝试 `winget` 和 python.org 官方安装包安装 Python 3.11。自动下载、Python 运行时、`.venv`、uv、依赖环境和安装缓存默认都放在项目所在盘的 `xiaoyang-photo-picker-runtime`。如果项目在 C 盘，启动器会自动从 D: 到 Z: 选择可用空间最大的本地盘（至少需要约 5GB）；也可以提前设置 `PIANKE_RUNTIME_DIR=E:\xiaoyang-photo-picker-runtime` 手动指定位置。网络受限的电脑也可以先手动安装 Python 3.11，再重新双击启动器。
 
 如果 D 盘空间不够、希望运行环境放到 C 盘，Windows 用户可直接双击 `启动_Windows_运行环境放C盘.bat`。它会把 Python 运行时、`.venv` 依赖环境和安装缓存放到 `C:\xiaoyang-photo-picker-runtime`。
 

@@ -17,22 +17,36 @@ set "RC=1"
 cd /d "%~dp0"
 
 set "PROJECT_DRIVE=%CD:~0,2%"
-set "LAUNCHER_BASE=%PROJECT_DRIVE%\xiaoyang-photo-picker-runtime"
-if /I "%PROJECT_DRIVE%"=="C:" (
-  if exist "D:\" set "LAUNCHER_BASE=D:\xiaoyang-photo-picker-runtime"
-  if not exist "D:\" (
-    if exist "E:\" set "LAUNCHER_BASE=E:\xiaoyang-photo-picker-runtime"
+set "LAUNCHER_BASE="
+if defined PIANKE_RUNTIME_DIR set "LAUNCHER_BASE=%PIANKE_RUNTIME_DIR%"
+if not defined LAUNCHER_BASE (
+  set "LAUNCHER_BASE=%PROJECT_DRIVE%\xiaoyang-photo-picker-runtime"
+  if /I "%PROJECT_DRIVE%"=="C:" (
+    REM If the project is on C:, prefer the non-C drive with the most free space.
+    set "AUTO_RUNTIME_DRIVE="
+    for /f "usebackq delims=" %%D in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$min=5368709120; $disk=Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=2 OR DriveType=3' | Where-Object { $_.DeviceID -ne 'C:' -and [int64]$_.FreeSpace -ge $min } | Sort-Object FreeSpace -Descending | Select-Object -First 1 -ExpandProperty DeviceID; if ($disk) { $disk }"`) do if not defined AUTO_RUNTIME_DRIVE set "AUTO_RUNTIME_DRIVE=%%D"
+    REM Older Windows may not have Get-CimInstance; use the first available drive as fallback.
+    if not defined AUTO_RUNTIME_DRIVE (
+      for %%D in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+        if not defined AUTO_RUNTIME_DRIVE if exist "%%D:\" set "AUTO_RUNTIME_DRIVE=%%D:"
+      )
+    )
+    if defined AUTO_RUNTIME_DRIVE set "LAUNCHER_BASE=!AUTO_RUNTIME_DRIVE!\xiaoyang-photo-picker-runtime"
   )
 )
-if defined PIANKE_RUNTIME_DIR set "LAUNCHER_BASE=%PIANKE_RUNTIME_DIR%"
 set "LAUNCHER_CACHE=%LAUNCHER_BASE%\.launcher-cache"
 set "LAUNCHER_PYTHON_DIR=%LAUNCHER_BASE%\.launcher-python\Python311"
 set "PIANKE_RUNTIME_DIR=%LAUNCHER_BASE%"
 set "UV_CACHE_DIR=%LAUNCHER_BASE%\.uv-cache"
 set "UV_PYTHON_INSTALL_DIR=%LAUNCHER_BASE%\.uv-python"
 set "PIP_CACHE_DIR=%LAUNCHER_BASE%\.pip-cache"
+set "UV_INSTALL_DIR=%LAUNCHER_BASE%\.uv-bin"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
+
+mkdir "%LAUNCHER_CACHE%" >nul 2>&1
+mkdir "%UV_INSTALL_DIR%" >nul 2>&1
+set "PATH=%UV_INSTALL_DIR%;%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%PATH%"
 
 echo.
 echo ============================================================
@@ -82,6 +96,9 @@ if not defined UV (
   if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UV=%USERPROFILE%\.cargo\bin\uv.exe"
 )
 
+if not defined UV (
+  if exist "%UV_INSTALL_DIR%\uv.exe" set "UV=%UV_INSTALL_DIR%\uv.exe"
+)
 if not defined UV (
   echo.
   echo [first-run setup] Python 3.11 was not found.
