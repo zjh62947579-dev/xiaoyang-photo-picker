@@ -18,7 +18,7 @@ def _session(tmp_path, group):
     )
 
 
-def test_apply_group_archives_winners_by_face_category_and_losers_by_reason(tmp_path):
+def test_apply_group_keeps_winners_in_place_and_archives_losers_by_reason(tmp_path):
     src_dir = tmp_path / "A" / "B"
     src_dir.mkdir(parents=True)
     winner = _write_photo(src_dir / "winner.jpg")
@@ -36,8 +36,8 @@ def test_apply_group_archives_winners_by_face_category_and_losers_by_reason(tmp_
 
     app_module.apply_group(group, str(tmp_path), dry_run=False, mode="copy", session=session)
 
-    assert (tmp_path / "winners" / "人像" / "winner.jpg").exists()
-    assert not (tmp_path / "winners" / "人像" / "A").exists()
+    assert (src_dir / "winner.jpg").exists()
+    assert not (tmp_path / "winners").exists()
     assert (tmp_path / "losers" / "模糊" / "A" / "B" / "blurry.jpg").exists()
     assert (tmp_path / "losers" / "重复落选" / "duplicate.jpg").exists()
 
@@ -71,14 +71,8 @@ def test_restore_rejected_archives_to_review_folder(tmp_path):
     assert not (tmp_path / "review" / "合照" / "set1").exists()
 
 
-def test_face_count_archives_to_expected_winner_categories(tmp_path):
-    expected = {
-        0: "风景",
-        1: "人像",
-        2: "人像",
-        3: "合照",
-    }
-    for count, category in expected.items():
+def test_face_count_kept_winners_stay_in_original_location(tmp_path):
+    for count in (0, 1, 2, 3):
         photo = _write_photo(tmp_path / f"face_{count}.jpg")
         group = app_module.GroupState(images=[photo], winner=photo, finished=True)
         session = _session(tmp_path, group)
@@ -86,10 +80,11 @@ def test_face_count_archives_to_expected_winner_categories(tmp_path):
 
         app_module.apply_group(group, str(tmp_path), dry_run=False, mode="copy", session=session)
 
-        assert (tmp_path / "winners" / category / f"face_{count}.jpg").exists()
+        assert (tmp_path / f"face_{count}.jpg").exists()
+    assert not (tmp_path / "winners").exists()
 
 
-def test_flat_winner_categories_keep_duplicate_names_unique(tmp_path):
+def test_extra_winners_keep_duplicate_names_in_original_folders(tmp_path):
     a_dir = tmp_path / "A"
     b_dir = tmp_path / "B"
     a_dir.mkdir()
@@ -108,8 +103,6 @@ def test_flat_winner_categories_keep_duplicate_names_unique(tmp_path):
 
     app_module.apply_group(group, str(tmp_path), dry_run=False, mode="copy", session=session)
 
-    flat_dir = tmp_path / "winners" / "风景"
-    assert (flat_dir / "same.jpg").exists()
-    assert (flat_dir / "same_1.jpg").exists()
-    assert not (flat_dir / "A").exists()
-    assert not (flat_dir / "B").exists()
+    assert (a_dir / "same.jpg").exists()
+    assert (b_dir / "same.jpg").exists()
+    assert not (tmp_path / "winners").exists()

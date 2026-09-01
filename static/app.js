@@ -11,12 +11,14 @@ function clearStartError() {
 function showStartError(message) {
   setText("start-error", message || "发生未知错误");
 }
-const VIEWS = ["landing", "batch", "processing", "prescreen", "preview", "arena", "done"];
+const VIEWS = ["landing", "batch", "video", "material", "processing", "prescreen", "preview", "arena", "done"];
 const RECENT_KEY = "pic-arena.recent-folders";
 const TUTORIAL_KEY = "pic-arena.tutorial-seen";
 const CONFIRM_MOVE_KEY = "pic-arena.confirmed-move";
 const CONFIRM_REAL_KEY = "pic-arena.confirmed-real";
 const RUNTIME_KEY = "pic_selecter.runtime";
+const TOOL_KEY = "pic_selecter.active_tool";
+const CONFIRM_VIDEO_MOVE_KEY = "pic_selecter.confirmed_video_move";
 const VERDICT_HOLD_MS = 380;
 
 let busy = false;
@@ -26,6 +28,10 @@ let currentGroup = null;
 let currentMode = "move";
 let recentWinners = []; // 最近胜出路径，给 arena-stack 用
 let streamSeq = 0;       // streaming log 已渲染到的 event_seq
+let activeTool = "photo";
+let videoJobKind = "single";
+let videoPollHandle = null;
+let materialPollHandle = null;
 
 // ---- 处理页照片墙 ----
 let wallCells = [];          // [{el, ev, addedAt}]
@@ -71,8 +77,10 @@ function showView(name, push = true) {
 }
 function updateTitle(view) {
   const map = {
-    landing: "小羊帮你筛照片",
+    landing: "小羊新媒体工具箱",
     batch: "批量预跑 · 小羊帮你筛照片",
+    video: "视频分类 · 小羊新媒体工具箱",
+    material: "素材整理 · 小羊新媒体工具箱",
     processing: "分析中… · 小羊帮你筛照片",
     prescreen: "初筛复核 · 小羊帮你筛照片",
     preview: "分组预览 · 小羊帮你筛照片",
@@ -195,7 +203,7 @@ async function goHome() {
   if (!onLanding) {
     const ok = await confirmDialog(
       "回到主页？",
-      "当前任务会被取消，已选文件夹和未保存进度会清空。\n（winners/ losers/ 文件夹里已搬过去的图片不会动）"
+      "当前任务会停止，已经完成归档的照片或视频不会被撤回；下次重新启动可继续处理剩余文件。"
     );
     if (!ok) return;
   }
@@ -209,13 +217,23 @@ async function goHome() {
   try {
     const fi = $("folder-input");
     if (fi) fi.value = "";
+    const vfi = $("video-folder-input");
+    if (vfi) vfi.value = "";
+    const mfi = $("material-folder-input");
+    if (mfi) mfi.value = "";
     $("folder-snapshot")?.classList.add("hidden");
+    if ($("video-folder-peek")) $("video-folder-peek").hidden = true;
+    if ($("material-folder-peek")) $("material-folder-peek").hidden = true;
+    setText("video-error", "");
+    setText("material-error", "");
     // 重置全局变量（防御性）
     if (typeof currentGroup !== "undefined") currentGroup = null;
     if (typeof lastSession !== "undefined") lastSession = null;
     // 停掉 job polling（processing 页面用的）
     if (typeof stopJobPolling === "function") stopJobPolling();
     if (typeof stopBatchPolling === "function") stopBatchPolling();
+    if (typeof stopVideoPolling === "function") stopVideoPolling();
+    if (typeof stopMaterialPolling === "function") stopMaterialPolling();
   } catch (e) {
     console.warn("前端状态清理异常:", e);
   }
@@ -229,6 +247,43 @@ document.querySelectorAll(".btn-go-home").forEach(el => el.addEventListener("cli
 // =================================================================
 // 着陆页
 // =================================================================
+function selectLandingTool(tool, persist = true) {
+  activeTool = ["photo", "video", "material"].includes(tool) ? tool : "photo";
+  const photoActive = activeTool === "photo";
+  const videoActive = activeTool === "video";
+  const materialActive = activeTool === "material";
+  const photoTab = $("tool-photo-tab");
+  const videoTab = $("tool-video-tab");
+  const materialTab = $("tool-material-tab");
+  const photoPanel = $("photo-tool-panel");
+  const videoPanel = $("video-tool-panel");
+  const materialPanel = $("material-tool-panel");
+  photoTab?.classList.toggle("is-active", photoActive);
+  videoTab?.classList.toggle("is-active", videoActive);
+  materialTab?.classList.toggle("is-active", materialActive);
+  photoTab?.setAttribute("aria-selected", String(photoActive));
+  videoTab?.setAttribute("aria-selected", String(videoActive));
+  materialTab?.setAttribute("aria-selected", String(materialActive));
+  if (photoPanel) photoPanel.hidden = !photoActive;
+  if (videoPanel) videoPanel.hidden = !videoActive;
+  if (materialPanel) materialPanel.hidden = !materialActive;
+  setText("landing-formats", photoActive
+    ? "JPG · PNG · HEIC · WEBP · TIFF · RAW"
+    : videoActive
+      ? "MP4 · MOV · MKV · AVI · MTS · WEBM"
+      : "ZIP · 风景 · 人像 · 合照");
+  clearStartError();
+  setText("video-error", "");
+  setText("material-error", "");
+  setStatus(photoActive ? "照片引擎就绪" : videoActive ? "视频分类引擎就绪" : "素材整理就绪", "idle");
+  if (persist) localStorage.setItem(TOOL_KEY, activeTool);
+}
+
+$("tool-photo-tab")?.addEventListener("click", () => selectLandingTool("photo"));
+$("tool-video-tab")?.addEventListener("click", () => selectLandingTool("video"));
+$("tool-material-tab")?.addEventListener("click", () => selectLandingTool("material"));
+selectLandingTool(localStorage.getItem(TOOL_KEY) || "photo", false);
+
 function loadRecent() {
   try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"); }
   catch { return []; }
@@ -538,6 +593,14 @@ restoreRuntimeChoice();
         faceOpt.parentElement?.classList.add("is-disabled");
       }
     }
+    if (!cap.video_person_detection) {
+      const message = "视频分类缺少 torch / torchvision，请先运行最新版启动器补齐依赖。";
+      const videoStart = $("video-start-btn");
+      const videoBatch = $("video-batch-btn");
+      if (videoStart) { videoStart.disabled = true; videoStart.title = message; }
+      if (videoBatch) { videoBatch.disabled = true; videoBatch.title = message; }
+      setText("video-error", message);
+    }
   } catch {}
 })();
 
@@ -592,7 +655,7 @@ async function doFolderPeek(folder) {
   if (r.has_prior) {
     const summary = r.state_summary
       ? `已完成 ${r.state_summary.finished_groups || 0} / ${r.state_summary.total_groups || 0} 组。`
-      : "发现 winners/losers/review 结果目录。";
+      : "发现 losers/review 或历史结果目录。";
     setText("resume-summary", r.can_resume
       ? `${summary} 可以继续上次筛选，或清掉结果重新开始。`
       : `${summary} 未找到可恢复进度，只能重新开始。`);
@@ -679,14 +742,14 @@ async function handleStart(e, options = {}) {
   if (mode === "move" && !payload.dry_run && !localStorage.getItem(CONFIRM_MOVE_KEY)) {
     const ok = await confirmDialog(
       "确认移动文件",
-      '选择"移动"模式：原文件会被搬到 winners/、losers/ 与 review/。强烈推荐"复制"模式以便反悔。继续？'
+      '选择"移动"模式：好片留在原分类文件夹，废片会移动到 losers/，召回照片会进入 review/。继续？'
     );
     if (!ok) return;
     localStorage.setItem(CONFIRM_MOVE_KEY, "1");
   } else if (!payload.dry_run && !localStorage.getItem(CONFIRM_REAL_KEY)) {
     const ok = await confirmDialog(
       "开始处理",
-      `将在 ${folder}/winners 与 /losers 创建副本（复制模式）。继续？`
+      `好片保持原位，废片会复制到 ${folder}/losers（复制模式）。继续？`
     );
     if (!ok) return;
     localStorage.setItem(CONFIRM_REAL_KEY, "1");
@@ -745,7 +808,7 @@ $("btn-resume-session").addEventListener("click", resumeSession);
 $("btn-force-restart").addEventListener("click", async () => {
   const ok = await confirmDialog(
     "重新开始",
-    "这会清掉旧进度和 winners/losers/review 输出目录后重新处理。确定继续？"
+    "这会清掉旧进度和 losers/review 等输出目录后重新处理。确定继续？"
   );
   if (!ok) return;
   handleStart(null, { forceRestart: true });
@@ -938,6 +1001,549 @@ $("browse-btn").addEventListener("click", async () => {
 });
 $("folder-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); handleStart(e); }
+});
+
+// =================================================================
+// 视频分类：单文件夹 + 总文件夹批量
+// =================================================================
+function currentVideoMode() {
+  return document.querySelector('input[name="video-mode"]:checked')?.value || "move";
+}
+
+function syncVideoModeOptions() {
+  document.querySelectorAll(".video-mode-option").forEach((label) => {
+    const input = label.querySelector('input[type="radio"]');
+    label.classList.toggle("is-active", !!input?.checked);
+  });
+}
+document.querySelectorAll('input[name="video-mode"]').forEach((input) => {
+  input.addEventListener("change", syncVideoModeOptions);
+});
+syncVideoModeOptions();
+
+let videoPeekTimer = null;
+async function peekVideoFolder(folder) {
+  clearTimeout(videoPeekTimer);
+  const peek = $("video-folder-peek");
+  if (!folder) {
+    if (peek) peek.hidden = true;
+    return;
+  }
+  videoPeekTimer = setTimeout(async () => {
+    try {
+      const data = await fetchJSON("/api/video/peek", {
+        method: "POST",
+        body: JSON.stringify({ folder }),
+      });
+      setText("video-peek-count", (data.count || 0).toLocaleString());
+      setText("video-peek-batch", data.batch_folders
+        ? `${data.batch_folders} 个一级子文件夹 · 共 ${data.batch_videos} 个视频`
+        : "当前文件夹可直接分类");
+      if (peek) peek.hidden = false;
+      setText("video-error", data.count || data.batch_videos ? "" : "没有找到可处理的视频");
+    } catch (e) {
+      if (peek) peek.hidden = true;
+    }
+  }, 220);
+}
+
+$("video-folder-input")?.addEventListener("input", (e) => {
+  peekVideoFolder(e.target.value.trim());
+});
+$("video-folder-input")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); startVideoClassification(false); }
+});
+
+const videoDrop = $("video-folder-drop");
+if (videoDrop) {
+  ["dragover", "dragenter"].forEach((name) => videoDrop.addEventListener(name, (e) => {
+    e.preventDefault();
+    videoDrop.classList.add("drag-over");
+  }));
+  ["dragleave", "drop"].forEach((name) => videoDrop.addEventListener(name, (e) => {
+    e.preventDefault();
+    videoDrop.classList.remove("drag-over");
+  }));
+  videoDrop.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files?.[0];
+    if (file?.path) {
+      $("video-folder-input").value = file.path;
+      peekVideoFolder(file.path);
+    } else {
+      toast("浏览器无法直接获取文件夹路径，请粘贴绝对路径");
+    }
+  });
+}
+
+$("video-browse-btn")?.addEventListener("click", async () => {
+  const button = $("video-browse-btn");
+  button.disabled = true;
+  try {
+    const data = await fetchJSON("/api/browse_folder", {
+      method: "POST",
+      body: JSON.stringify({ kind: "video" }),
+    });
+    if (data.folder) {
+      $("video-folder-input").value = data.folder;
+      peekVideoFolder(data.folder);
+      setText("video-error", "");
+    }
+  } catch (e) {
+    setText("video-error", e.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function stopVideoPolling() {
+  if (videoPollHandle) clearInterval(videoPollHandle);
+  videoPollHandle = null;
+}
+
+function enterVideoJob(kind, folder) {
+  videoJobKind = kind === "batch" ? "batch" : "single";
+  showView("video");
+  window.scrollTo(0, 0);
+  setText("video-job-folder", folder);
+  setText("video-job-eyebrow", videoJobKind === "batch" ? "批量视频分类" : "视频分类中");
+  setText("video-job-title", videoJobKind === "batch" ? "正在逐个整理路线文件夹" : "正在整理视频素材");
+  setText("video-total-label", videoJobKind === "batch" ? "路线文件夹" : "总视频");
+  setText("video-result-title", videoJobKind === "batch" ? "路线进度" : "最近完成");
+  setText("video-result-note", videoJobKind === "batch" ? "每个一级子文件夹独立归档，非视频进其他文件" : "抽样识别，不上传视频；非视频进其他文件");
+  $("btn-video-open").disabled = true;
+  $("btn-video-cancel").disabled = false;
+  setText("video-job-error", "");
+  stopVideoPolling();
+  refreshVideoStatus();
+  videoPollHandle = setInterval(refreshVideoStatus, 1000);
+  setStatus(videoJobKind === "batch" ? "批量视频分类中" : "视频分类中", "busy");
+}
+
+function renderSingleVideoItems(items, mode) {
+  const list = $("video-result-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const recent = [...(items || [])].reverse();
+  if (!recent.length) {
+    const empty = document.createElement("div");
+    empty.className = "video-result-empty";
+    empty.textContent = "识别结果会在这里逐条出现。";
+    list.appendChild(empty);
+    return;
+  }
+  recent.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `video-result-row ${item.status === "error" ? "is-error" : ""}`;
+
+    const name = document.createElement("div");
+    name.className = "video-result-name";
+    name.textContent = item.name || basename(item.source);
+    name.title = item.source || "";
+
+    const category = document.createElement("div");
+    category.className = "video-result-category";
+    category.textContent = item.error ? "未分类" : `${item.orientation} · ${item.content}`;
+
+    const score = document.createElement("div");
+    score.className = "video-result-score";
+    score.textContent = item.error
+      ? item.error
+      : (item.content === "人像" ? `人物 ${Math.round((item.person_score || 0) * 100)}%` : "未检出人物");
+    score.title = item.error || "";
+
+    const status = document.createElement("div");
+    status.className = "video-result-status";
+    const statusLabels = {
+      processed: mode === "move" ? "已移动" : "已复制",
+      skipped: "已完成",
+      error: "失败 · 原位保留",
+    };
+    status.textContent = statusLabels[item.status] || item.status || "";
+
+    row.append(name, category, score, status);
+    list.appendChild(row);
+  });
+}
+
+function renderVideoBatchItems(items) {
+  const list = $("video-result-list");
+  if (!list) return;
+  list.innerHTML = "";
+  (items || []).forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `video-result-row is-batch ${item.status === "error" ? "is-error" : ""}`;
+
+    const name = document.createElement("div");
+    name.className = "video-result-name";
+    name.textContent = item.name || basename(item.folder);
+    name.title = item.folder || "";
+
+    const state = document.createElement("div");
+    state.className = "video-result-category";
+    const labels = { pending: "等待", running: "处理中", done: "完成", error: "失败", cancelled: "已取消" };
+    state.textContent = labels[item.status] || item.status || "等待";
+
+    const counts = document.createElement("div");
+    counts.className = "video-batch-counts";
+    counts.textContent = `新处理 ${item.processed || 0} · 已完成 ${item.skipped || 0} · 失败 ${item.failed || 0} · 其他 ${item.other_files || 0}`;
+
+    const progress = document.createElement("div");
+    progress.className = "video-result-status";
+    progress.textContent = `${item.done || 0} / ${item.video_count || 0}`;
+    progress.title = item.error || item.label || "";
+
+    row.append(name, state, counts, progress);
+    list.appendChild(row);
+  });
+}
+
+async function refreshVideoStatus() {
+  const endpoint = videoJobKind === "batch" ? "/api/video/batch/status" : "/api/video/status";
+  let job;
+  try {
+    job = await fetchJSON(endpoint);
+  } catch (e) {
+    setText("video-job-error", `读取进度失败：${e.message}`);
+    return;
+  }
+  if (job.status === "idle") {
+    stopVideoPolling();
+    showView("landing");
+    selectLandingTool("video", false);
+    return;
+  }
+
+  const done = job.done || 0;
+  const total = job.total || 0;
+  const percent = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+  setText("video-job-folder", job.folder || job.root || "");
+  setText("video-job-done", done.toLocaleString());
+  setText("video-job-total", total.toLocaleString());
+  setText("video-job-failed", (job.failed || 0).toLocaleString());
+  setText("video-progress-count", `${done} / ${total}`);
+  setText("video-progress-pct", `${percent}%`);
+  $("video-progress-fill").style.width = `${percent}%`;
+  setText("video-job-label", job.label || "");
+  setText("video-job-error", job.error ? `处理失败：${job.error}` : "");
+  if (!["pending", "checking", "running"].includes(job.status)) {
+    setText(
+      "video-result-note",
+      `${videoJobKind === "batch" ? "批量完成" : "最近完成"} · 其他文件 ${(job.other_files || 0).toLocaleString()} 个`
+    );
+  }
+
+  const categories = job.categories || {};
+  setText("video-count-landscape-scenery", (categories["横屏/风景"] || 0).toLocaleString());
+  setText("video-count-landscape-people", (categories["横屏/人像"] || 0).toLocaleString());
+  setText("video-count-portrait-scenery", (categories["竖屏/风景"] || 0).toLocaleString());
+  setText("video-count-portrait-people", (categories["竖屏/人像"] || 0).toLocaleString());
+
+  if (videoJobKind === "batch") renderVideoBatchItems(job.items || []);
+  else renderSingleVideoItems(job.items || [], job.mode);
+
+  const active = ["pending", "checking", "running"].includes(job.status);
+  $("btn-video-cancel").disabled = !active;
+  $("btn-video-open").disabled = active || job.status === "error";
+  if (active) {
+    const prefix = job.status === "checking" ? "准备视频模型" : "视频分类中";
+    setStatus(`${prefix} · ${done} / ${total}`, "busy");
+  } else {
+    stopVideoPolling();
+    if (job.status === "done") setStatus("视频分类完成", job.failed ? "waiting" : "done");
+    else if (job.status === "cancelled") setStatus("视频分类已中止，可续跑", "idle");
+    else setStatus("视频分类失败", "error");
+  }
+}
+
+async function startVideoClassification(batch) {
+  const folder = $("video-folder-input")?.value.trim() || "";
+  const mode = currentVideoMode();
+  setText("video-error", "");
+  if (!folder) {
+    setText("video-error", batch ? "请填写包含多个路线文件夹的总目录" : "请填写视频文件夹路径");
+    return;
+  }
+
+  if (mode === "move" && !localStorage.getItem(CONFIRM_VIDEO_MOVE_KEY)) {
+    const ok = await confirmDialog(
+      batch ? "批量移动并分类视频？" : "移动并分类视频？",
+      batch
+        ? "每个一级子文件夹里的视频会移动到各自的“横屏视频/竖屏视频”下，再分风景或人像；图片、文档等非视频会放入“其他文件”。中断后可重新启动继续。"
+        : "视频会移动到当前目录下的“横屏视频/竖屏视频”下，再分风景或人像；图片、文档等非视频会放入“其他文件”。无法读取的文件会留在原位置。"
+    );
+    if (!ok) return;
+    localStorage.setItem(CONFIRM_VIDEO_MOVE_KEY, "1");
+  } else if (mode === "copy") {
+    const ok = await confirmDialog(
+      batch ? "批量复制并分类视频？" : "复制并分类视频？",
+      "原视频会保留，分类结果和“其他文件”会额外占用接近相同的磁盘空间。确认继续？"
+    );
+    if (!ok) return;
+  }
+
+  const button = batch ? $("video-batch-btn") : $("video-start-btn");
+  button.disabled = true;
+  try {
+    const endpoint = batch ? "/api/video/batch/start" : "/api/video/start";
+    await fetchJSON(endpoint, {
+      method: "POST",
+      body: JSON.stringify({ folder, mode, runtime: currentRuntime() }),
+    });
+    enterVideoJob(batch ? "batch" : "single", folder);
+  } catch (e) {
+    setText("video-error", e.message);
+    setStatus("视频分类启动失败", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("video-start-btn")?.addEventListener("click", () => startVideoClassification(false));
+$("video-form")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  startVideoClassification(false);
+});
+$("video-batch-btn")?.addEventListener("click", () => startVideoClassification(true));
+$("btn-video-cancel")?.addEventListener("click", async () => {
+  const endpoint = videoJobKind === "batch" ? "/api/video/batch/cancel" : "/api/video/cancel";
+  try {
+    await fetchJSON(endpoint, { method: "POST" });
+    setText("video-job-label", "正在中止，当前视频处理完后停止...");
+  } catch (e) {
+    toast(`中止失败：${e.message}`);
+  }
+});
+$("btn-video-open")?.addEventListener("click", async () => {
+  try {
+    await fetchJSON("/api/video/open", {
+      method: "POST",
+      body: JSON.stringify({ kind: videoJobKind }),
+    });
+  } catch (e) {
+    toast(`打开失败：${e.message}`);
+  }
+});
+
+// =================================================================
+// 素材整理：独立板块
+// =================================================================
+let materialPeekTimer = null;
+async function peekMaterialFolder(folder) {
+  clearTimeout(materialPeekTimer);
+  const peek = $("material-folder-peek");
+  if (!folder) {
+    if (peek) peek.hidden = true;
+    return;
+  }
+  materialPeekTimer = setTimeout(async () => {
+    try {
+      const data = await fetchJSON("/api/material/peek", {
+        method: "POST",
+        body: JSON.stringify({ folder }),
+      });
+      setText("material-peek-archives", (data.archives || 0).toLocaleString());
+      setText("material-peek-routes",
+        `${data.routes || 0} 条路线 · ${data.route_dirs || 0} 个待归并文件夹 · ${data.duplicate_dirs || 0} 个重复文件夹`);
+      if (peek) peek.hidden = false;
+      setText("material-error", (data.archives || data.route_dirs || data.duplicate_dirs) ? "" : "没有发现需要整理的素材");
+    } catch (e) {
+      if (peek) peek.hidden = true;
+    }
+  }, 220);
+}
+
+$("material-folder-input")?.addEventListener("input", (e) => {
+  peekMaterialFolder(e.target.value.trim());
+});
+$("material-folder-input")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); startMaterialOrganize(); }
+});
+
+const materialDrop = $("material-folder-drop");
+if (materialDrop) {
+  ["dragover", "dragenter"].forEach((name) => materialDrop.addEventListener(name, (e) => {
+    e.preventDefault();
+    materialDrop.classList.add("drag-over");
+  }));
+  ["dragleave", "drop"].forEach((name) => materialDrop.addEventListener(name, (e) => {
+    e.preventDefault();
+    materialDrop.classList.remove("drag-over");
+  }));
+  materialDrop.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files?.[0];
+    if (file?.path) {
+      $("material-folder-input").value = file.path;
+      peekMaterialFolder(file.path);
+    } else {
+      toast("浏览器无法直接获取文件夹路径，请粘贴绝对路径");
+    }
+  });
+}
+
+$("material-browse-btn")?.addEventListener("click", async () => {
+  const button = $("material-browse-btn");
+  button.disabled = true;
+  try {
+    const data = await fetchJSON("/api/browse_folder", {
+      method: "POST",
+      body: JSON.stringify({ kind: "material" }),
+    });
+    if (data.folder) {
+      $("material-folder-input").value = data.folder;
+      peekMaterialFolder(data.folder);
+      setText("material-error", "");
+    }
+  } catch (e) {
+    setText("material-error", e.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function stopMaterialPolling() {
+  if (materialPollHandle) clearInterval(materialPollHandle);
+  materialPollHandle = null;
+}
+
+function enterMaterialJob(folder) {
+  showView("material");
+  window.scrollTo(0, 0);
+  setText("material-job-folder", folder);
+  $("btn-material-open").disabled = true;
+  $("btn-material-cancel").disabled = false;
+  setText("material-job-error", "");
+  stopMaterialPolling();
+  refreshMaterialStatus();
+  materialPollHandle = setInterval(refreshMaterialStatus, 1000);
+  setStatus("素材整理中", "busy");
+}
+
+function renderMaterialItems(items) {
+  const list = $("material-result-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const recent = [...(items || [])].reverse();
+  if (!recent.length) {
+    const empty = document.createElement("div");
+    empty.className = "video-result-empty";
+    empty.textContent = "整理结果会在这里逐条出现。";
+    list.appendChild(empty);
+    return;
+  }
+  recent.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `video-result-row ${item.status === "error" ? "is-error" : ""}`;
+    const name = document.createElement("div");
+    name.className = "video-result-name";
+    name.textContent = basename(item.source);
+    name.title = item.source || "";
+    const action = document.createElement("div");
+    action.className = "video-result-category";
+    const labels = {
+      extract: "解压",
+      organize_dir: "归并",
+      delete_duplicate_dir: "删除重复",
+    };
+    action.textContent = labels[item.action] || item.action || "";
+    const note = document.createElement("div");
+    note.className = "video-batch-counts";
+    note.textContent = item.note || "";
+    const status = document.createElement("div");
+    status.className = "video-result-status";
+    status.textContent = item.status === "error" ? "失败" : "完成";
+    row.append(name, action, note, status);
+    list.appendChild(row);
+  });
+}
+
+async function refreshMaterialStatus() {
+  let job;
+  try {
+    job = await fetchJSON("/api/material/status");
+  } catch (e) {
+    setText("material-job-error", `读取进度失败：${e.message}`);
+    return;
+  }
+  if (job.status === "idle") {
+    stopMaterialPolling();
+    showView("landing");
+    selectLandingTool("material", false);
+    return;
+  }
+  const done = job.done || 0;
+  const total = job.total || 0;
+  const percent = total ? Math.min(100, Math.round(done / total * 100)) : (job.status === "done" ? 100 : 0);
+  setText("material-job-folder", job.folder || "");
+  setText("material-job-extracted", (job.extracted_archives || 0).toLocaleString());
+  setText("material-job-organized", (job.organized_dirs || 0).toLocaleString());
+  setText("material-job-deleted", (job.deleted_duplicate_dirs || 0).toLocaleString());
+  setText("material-progress-count", total ? `${done} / ${total}` : "—");
+  setText("material-progress-pct", `${percent}%`);
+  $("material-progress-fill").style.width = `${percent}%`;
+  setText("material-job-label", job.label || "");
+  setText("material-job-error", job.error ? `处理失败：${job.error}` : "");
+  renderMaterialItems(job.items || []);
+
+  const active = ["pending", "running"].includes(job.status);
+  $("btn-material-cancel").disabled = !active;
+  $("btn-material-open").disabled = active || job.status === "error";
+  if (active) {
+    setStatus("素材整理中", "busy");
+  } else {
+    stopMaterialPolling();
+    if (job.status === "done") setStatus("素材整理完成", job.failed ? "waiting" : "done");
+    else if (job.status === "cancelled") setStatus("素材整理已中止", "idle");
+    else setStatus("素材整理失败", "error");
+  }
+}
+
+async function startMaterialOrganize() {
+  const folder = $("material-folder-input")?.value.trim() || "";
+  setText("material-error", "");
+  if (!folder) {
+    setText("material-error", "请填写素材文件夹路径");
+    return;
+  }
+  const ok = await confirmDialog(
+    "开始整理素材？",
+    "会解压压缩包，解压成功后删除原压缩包；带 (1)(2)(3) 的重复文件夹会删除。继续？"
+  );
+  if (!ok) return;
+  const button = $("material-start-btn");
+  button.disabled = true;
+  try {
+    await fetchJSON("/api/material/start", {
+      method: "POST",
+      body: JSON.stringify({ folder }),
+    });
+    enterMaterialJob(folder);
+  } catch (e) {
+    setText("material-error", e.message);
+    setStatus("素材整理启动失败", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("material-start-btn")?.addEventListener("click", startMaterialOrganize);
+$("material-form")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  startMaterialOrganize();
+});
+$("btn-material-cancel")?.addEventListener("click", async () => {
+  try {
+    await fetchJSON("/api/material/cancel", { method: "POST" });
+    setText("material-job-label", "正在中止素材整理...");
+  } catch (e) {
+    toast(`中止失败：${e.message}`);
+  }
+});
+$("btn-material-open")?.addEventListener("click", async () => {
+  try {
+    await fetchJSON("/api/material/open", { method: "POST" });
+  } catch (e) {
+    toast(`打开失败：${e.message}`);
+  }
 });
 
 // =================================================================
@@ -2532,7 +3138,7 @@ async function renderWinnersAlbum(options = {}) {
   }
   $("winners-count").textContent = list.length ? `${list.length} 张` : "";
   if (!list.length) {
-    album.innerHTML = '<div class="winners-empty">没有胜出的照片</div>';
+    album.innerHTML = '<div class="winners-empty">没有留下的照片</div>';
     return;
   }
 
@@ -2666,11 +3272,11 @@ async function enterDone(status) {
   const modeWord = s.mode === "move" ? "移动" : "复制";
   const baseLine = s.dry_run
     ? "试运行模式 · 没有真的搬运文件，但你已确认了所有选择。"
-    : `胜出以「${modeWord}」归到 winners/，淘汰归到 losers/。`;
+    : `好片留在原分类文件夹，淘汰以「${modeWord}」归到 losers/。`;
   $("done-sub").textContent = singles > 0
-    ? `${baseLine}（其中 ${singles} 张无相似副本，直接归入 winners/。）`
+    ? `${baseLine}（其中 ${singles} 张无相似副本，保持原位。）`
     : baseLine;
-  $("path-win").textContent = (s.folder || "") + "/winners";
+  $("path-win").textContent = s.folder || "";
   $("path-lose").textContent = (s.folder || "") + "/losers";
 
   const unfinished = s.unfinished_groups || 0;
@@ -2726,7 +3332,7 @@ $("btn-refine-winners").addEventListener("click", async () => {
   if ((s.winner_count || 0) < 2) { toast("保留照片少于 2 张，无需继续 PK"); return; }
   const ok = await confirmDialog(
     "继续筛保留照片",
-    "只对当前 winners/ 和 review/ 中已保留的照片重新分组 PK。保留的继续留在 winners/，不要的会移到 losers/重复落选/。继续？"
+    "只对当前已保留的照片重新分组 PK。保留的继续留在原位置，不要的会移到 losers/重复落选/。继续？"
   );
   if (!ok) return;
   const btn = $("btn-refine-winners");
@@ -2754,7 +3360,7 @@ $("btn-redo-folder").addEventListener("click", async () => {
   if (!s || !s.folder) { toast("没有可重做的会话"); return; }
   const ok = await confirmDialog(
     "重做这个文件夹",
-    `将清掉 ${s.folder}/winners、/losers 与 /review 子目录、所有缓存与本次进度，` +
+    `将清掉 ${s.folder}/losers 与 /review 子目录、所有缓存与本次进度，` +
     `用同样的设置（${s.mode === "move" ? "移动" : "复制"}模式` +
     `${s.dry_run ? "、试运行" : ""}）重新分组挑选。\n\n这步不可撤销，确定继续？`
   );
@@ -2794,10 +3400,10 @@ async function reopenGroup(groupId, groupSize, btn) {
   const ok = await confirmDialog(
     word,
     groupSize > 1
-      ? `把这组的胜者和淘汰者从 winners/ 与 losers/ 还原回原位置，回到擂台从头挑。${
+      ? `把这组的保留项和淘汰项还原回原位置，回到擂台从头挑。${
           currentMode === "move" ? "（移动模式：文件会真的搬回去）" : ""
         }`
-      : `把这张从 winners/ 还原回原位置，回到擂台决定保留还是丢弃。${
+      : `把这张还原回原位置，回到擂台决定保留还是丢弃。${
           currentMode === "move" ? "（移动模式：文件会真的搬回去）" : ""
         }`
   );

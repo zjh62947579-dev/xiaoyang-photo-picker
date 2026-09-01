@@ -129,6 +129,7 @@ class SessionState:
     skip_duplicate_selection: bool = False
     record_preferences: bool = True
     scene_label: str = ""
+    keep_winners_in_place: bool = True
     prescreen_rejected: list[str] = field(default_factory=list)
     prescreen_reject_reasons: dict[str, str] = field(default_factory=dict)
     prescreen_restored: list[str] = field(default_factory=list)
@@ -224,6 +225,99 @@ class BatchJobState:
     scene_label: str = ""
     face_aware: bool = True
     llm_model: Optional[str] = None
+
+
+def _video_category_counts() -> dict[str, int]:
+    return {
+        "横屏/风景": 0,
+        "横屏/人像": 0,
+        "竖屏/风景": 0,
+        "竖屏/人像": 0,
+    }
+
+
+@dataclass
+class VideoJobState:
+    folder: str
+    mode: str = "move"
+    runtime: str = "auto"
+    status: str = "pending"  # pending | checking | running | done | error | cancelled
+    done: int = 0
+    total: int = 0
+    processed: int = 0
+    skipped: int = 0
+    failed: int = 0
+    other_files: int = 0
+    current: str = ""
+    label: str = ""
+    error: Optional[str] = None
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    cancel_requested: bool = False
+    categories: dict[str, int] = field(default_factory=_video_category_counts)
+    recent_items: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class VideoBatchItemState:
+    folder: str
+    name: str
+    video_count: int = 0
+    status: str = "pending"  # pending | running | done | error | cancelled
+    done: int = 0
+    processed: int = 0
+    skipped: int = 0
+    failed: int = 0
+    other_files: int = 0
+    label: str = ""
+    error: Optional[str] = None
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    categories: dict[str, int] = field(default_factory=_video_category_counts)
+
+
+@dataclass
+class VideoBatchJobState:
+    root: str
+    mode: str = "move"
+    runtime: str = "auto"
+    status: str = "pending"  # pending | checking | running | done | error | cancelled
+    items: list[VideoBatchItemState] = field(default_factory=list)
+    current_index: int = -1
+    done: int = 0
+    total: int = 0
+    processed: int = 0
+    skipped: int = 0
+    failed: int = 0
+    other_files: int = 0
+    label: str = ""
+    error: Optional[str] = None
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    cancel_requested: bool = False
+    categories: dict[str, int] = field(default_factory=_video_category_counts)
+
+
+@dataclass
+class MaterialJobState:
+    folder: str
+    status: str = "pending"  # pending | running | done | error | cancelled
+    done: int = 0
+    total: int = 0
+    deleted_duplicate_dirs: int = 0
+    extracted_archives: int = 0
+    deleted_archives: int = 0
+    organized_dirs: int = 0
+    moved_files: int = 0
+    skipped: int = 0
+    failed: int = 0
+    current: str = ""
+    label: str = ""
+    error: Optional[str] = None
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    cancel_requested: bool = False
+    recent_items: list[dict] = field(default_factory=list)
 
 
 # ---------------- 路径 / 日志 ----------------
@@ -573,6 +667,7 @@ def save_state(state: SessionState) -> None:
         "skip_duplicate_selection": state.skip_duplicate_selection,
         "record_preferences": state.record_preferences,
         "scene_label": state.scene_label,
+        "keep_winners_in_place": state.keep_winners_in_place,
         "prescreen_rejected": state.prescreen_rejected,
         "prescreen_reject_reasons": state.prescreen_reject_reasons,
         "prescreen_restored": state.prescreen_restored,
@@ -591,6 +686,7 @@ def _migrate_state(data: dict) -> dict:
     遇到太老的版本直接报错让用户重跑（项目无 git、单 session）。"""
     schema = data.get("schema", 1)
     if schema == STATE_SCHEMA:
+        data.setdefault("keep_winners_in_place", True)
         return data
     if schema == 4:
         # v4 → v5: 加预筛字段
@@ -618,6 +714,7 @@ def _migrate_state(data: dict) -> dict:
         data.setdefault("skip_duplicate_selection", False)
         data.setdefault("record_preferences", True)
         data.setdefault("scene_label", "")
+        data.setdefault("keep_winners_in_place", True)
         data["schema"] = 7
         return data
     raise ValueError(
@@ -650,6 +747,7 @@ def load_state(folder: str) -> Optional[SessionState]:
             skip_duplicate_selection=data.get("skip_duplicate_selection", False),
             record_preferences=data.get("record_preferences", True),
             scene_label=data.get("scene_label", ""),
+            keep_winners_in_place=data.get("keep_winners_in_place", True),
             prescreen_rejected=data.get("prescreen_rejected", []),
             prescreen_reject_reasons=data.get("prescreen_reject_reasons", {}),
             prescreen_restored=data.get("prescreen_restored", []),
@@ -1527,36 +1625,49 @@ def apply_group(group: GroupState, folder: str, dry_run: bool, mode: str,
     def _get_comps(p: str) -> list[str]:
         return list(session.companions.get(p, [])) if session else []
 
+    keep_winners_in_place = bool(session and session.keep_winners_in_place)
+
     if group.winner:
         old = group.winner
         comps = _get_comps(old)
-        win_d = _archive_dir_for("winner", folder, old, group, session)
-        if not dry_run:
-            win_d.mkdir(parents=True, exist_ok=True)
-        target_preview = _unique_target(win_d, Path(old).name)
-        moved["winner"] = {"from": old, "to": str(target_preview)}
-        if not dry_run:
-            result = _transfer_main_with_companions(old, win_d, mode, comps)
-            if result["ok"]:
-                new_main = result["main_target"]
-                group.move_log.append({"src": old, "dst": new_main, "kind": "winner"})
-                _record_companion_log(group, result["companion_pairs"], "winner_companion")
-                moved["winner"] = {"from": old, "to": new_main}
-                for cf in result["companion_failed"]:
-                    moved["failed"].append(cf)
-                if mode == "move":
-                    if session is not None and old in session.meta:
-                        session.meta[new_main] = session.meta[old]
-                    _update_session_companions_after_move(
-                        session, old, new_main, result["companion_pairs"]
-                    )
-                    group.winner = new_main
-            else:
-                moved["failed"].append({"path": old, "reason": result["main_error"]})
+        if keep_winners_in_place:
+            moved["winner"] = {"from": old, "to": old, "kept_in_place": True}
+            if not dry_run:
+                group.move_log.append({"src": old, "dst": old, "kind": "winner_in_place"})
+        else:
+            win_d = _archive_dir_for("winner", folder, old, group, session)
+            if not dry_run:
+                win_d.mkdir(parents=True, exist_ok=True)
+            target_preview = _unique_target(win_d, Path(old).name)
+            moved["winner"] = {"from": old, "to": str(target_preview)}
+            if not dry_run:
+                result = _transfer_main_with_companions(old, win_d, mode, comps)
+                if result["ok"]:
+                    new_main = result["main_target"]
+                    group.move_log.append({"src": old, "dst": new_main, "kind": "winner"})
+                    _record_companion_log(group, result["companion_pairs"], "winner_companion")
+                    moved["winner"] = {"from": old, "to": new_main}
+                    for cf in result["companion_failed"]:
+                        moved["failed"].append(cf)
+                    if mode == "move":
+                        if session is not None and old in session.meta:
+                            session.meta[new_main] = session.meta[old]
+                        _update_session_companions_after_move(
+                            session, old, new_main, result["companion_pairs"]
+                        )
+                        group.winner = new_main
+                else:
+                    moved["failed"].append({"path": old, "reason": result["main_error"]})
 
     new_extras = []
     for extra in group.extra_winners:
         comps = _get_comps(extra)
+        if keep_winners_in_place:
+            moved["extra_winners"].append({"from": extra, "to": extra, "kept_in_place": True})
+            if not dry_run:
+                group.move_log.append({"src": extra, "dst": extra, "kind": "winner_in_place"})
+            new_extras.append(extra)
+            continue
         win_d = _archive_dir_for("winner", folder, extra, group, session)
         if not dry_run:
             win_d.mkdir(parents=True, exist_ok=True)
@@ -1837,6 +1948,9 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 SESSION: Optional[SessionState] = None
 JOB: Optional[JobState] = None
 BATCH_JOB: Optional[BatchJobState] = None
+VIDEO_JOB: Optional[VideoJobState] = None
+VIDEO_BATCH_JOB: Optional[VideoBatchJobState] = None
+MATERIAL_JOB: Optional[MaterialJobState] = None
 LOCK = threading.Lock()
 # Phase 4 预览阶段保留的 infos（任务完成后可重新分组而不重哈希）
 LAST_INFOS: Optional[list[ImageInfo]] = None
@@ -2470,6 +2584,18 @@ def _is_batch_running(job: Optional[BatchJobState]) -> bool:
     return bool(job and job.status == "running")
 
 
+def _is_video_job_running(job: Optional[VideoJobState]) -> bool:
+    return bool(job and job.status in ("pending", "checking", "running"))
+
+
+def _is_video_batch_running(job: Optional[VideoBatchJobState]) -> bool:
+    return bool(job and job.status in ("pending", "checking", "running"))
+
+
+def _is_material_job_running(job: Optional[MaterialJobState]) -> bool:
+    return bool(job and job.status in ("pending", "running"))
+
+
 def _has_prior_outputs_or_state(folder: str) -> bool:
     p = Path(folder)
     return (
@@ -2647,6 +2773,236 @@ def _run_batch_job() -> None:
         job.status = "error"
         job.error = str(e)
         job.label = "批量预跑失败"
+    finally:
+        job.finished_at = time.time()
+
+
+def _update_video_counts(job, item) -> None:
+    if item.status == "processed":
+        job.processed += 1
+    elif item.status == "skipped":
+        job.skipped += 1
+    elif item.status == "error":
+        job.failed += 1
+    if item.orientation and item.content and item.status in ("processed", "skipped"):
+        key = f"{item.orientation}/{item.content}"
+        if key in job.categories:
+            job.categories[key] += 1
+
+
+def _run_video_job() -> None:
+    job = VIDEO_JOB
+    assert job is not None
+    job.started_at = time.time()
+    try:
+        from pic_selecter import video_classifier, vision
+
+        _apply_runtime_selection(job.runtime)
+        job.status = "checking"
+        job.label = "校验视频人物检测能力..."
+        vision.require_person_detector_capabilities()
+        vision.prewarm_person_detector(
+            progress=lambda done, total, label: setattr(job, "label", label),
+        )
+
+        job.status = "running"
+        job.label = "正在扫描视频..."
+
+        def on_progress(done, total, label, item):
+            job.done = done
+            job.total = total
+            job.label = label
+            if item is None:
+                return
+            job.current = item.name
+            _update_video_counts(job, item)
+            job.recent_items.append(asdict(item))
+            if len(job.recent_items) > 80:
+                del job.recent_items[:-80]
+
+        summary = video_classifier.sort_videos(
+            job.folder,
+            mode=job.mode,
+            progress=on_progress,
+            cancel_check=lambda: job.cancel_requested,
+        )
+        job.done = summary.total
+        job.total = summary.total
+        job.processed = summary.processed
+        job.skipped = summary.skipped
+        job.failed = summary.failed
+        job.other_files = summary.other_files
+        job.categories = dict(summary.categories)
+        job.recent_items = [asdict(item) for item in summary.items[-80:]]
+        job.status = "done"
+        job.label = (
+            f"视频分类完成：新处理 {job.processed} 个，"
+            f"已完成跳过 {job.skipped} 个，失败 {job.failed} 个，"
+            f"其他文件 {job.other_files} 个"
+        )
+    except Exception as exc:
+        from pic_selecter import video_classifier
+
+        if isinstance(exc, video_classifier.VideoCancelled) or job.cancel_requested:
+            job.status = "cancelled"
+            job.label = "视频分类已中止，可重新启动继续"
+        else:
+            job.status = "error"
+            job.error = str(exc)
+            job.label = "视频分类失败"
+            logger.exception("video classification error")
+    finally:
+        job.finished_at = time.time()
+
+
+def _run_video_batch_job() -> None:
+    job = VIDEO_BATCH_JOB
+    assert job is not None
+    job.started_at = time.time()
+    try:
+        from pic_selecter import video_classifier, vision
+
+        _apply_runtime_selection(job.runtime)
+        job.status = "checking"
+        job.label = "校验视频人物检测能力..."
+        vision.require_person_detector_capabilities()
+        vision.prewarm_person_detector(
+            progress=lambda done, total, label: setattr(job, "label", label),
+        )
+        job.status = "running"
+
+        for index, batch_item in enumerate(job.items):
+            if job.cancel_requested:
+                batch_item.status = "cancelled"
+                batch_item.label = "已取消"
+                break
+            job.current_index = index
+            batch_item.status = "running"
+            batch_item.started_at = time.time()
+            batch_item.label = "正在扫描视频..."
+            job.label = f"{batch_item.name} · 正在扫描视频..."
+
+            def on_progress(done, total, label, sorted_item, current=batch_item):
+                current.done = done
+                current.video_count = total
+                current.label = label
+                job.label = f"{current.name} · {label}"
+                if sorted_item is not None:
+                    _update_video_counts(current, sorted_item)
+
+            try:
+                summary = video_classifier.sort_videos(
+                    batch_item.folder,
+                    mode=job.mode,
+                    progress=on_progress,
+                    cancel_check=lambda: job.cancel_requested,
+                )
+                batch_item.done = summary.total
+                batch_item.video_count = summary.total
+                batch_item.processed = summary.processed
+                batch_item.skipped = summary.skipped
+                batch_item.failed = summary.failed
+                batch_item.other_files = summary.other_files
+                batch_item.categories = dict(summary.categories)
+                batch_item.status = "done"
+                batch_item.label = (
+                    f"完成：新处理 {summary.processed}，"
+                    f"跳过 {summary.skipped}，失败 {summary.failed}，"
+                    f"其他文件 {summary.other_files}"
+                )
+            except video_classifier.VideoCancelled:
+                batch_item.status = "cancelled"
+                batch_item.label = "已取消，可重新启动继续"
+                break
+            except Exception as exc:
+                batch_item.status = "error"
+                batch_item.error = str(exc)
+                batch_item.label = "该文件夹处理失败"
+                logger.exception("video batch item error")
+            finally:
+                batch_item.finished_at = time.time()
+                job.done += 1
+                job.processed = sum(item.processed for item in job.items)
+                job.skipped = sum(item.skipped for item in job.items)
+                job.failed = sum(item.failed for item in job.items)
+                job.other_files = sum(item.other_files for item in job.items)
+                job.categories = {
+                    key: sum(item.categories.get(key, 0) for item in job.items)
+                    for key in _video_category_counts()
+                }
+
+        if job.cancel_requested:
+            job.status = "cancelled"
+            job.label = "批量视频分类已中止，可重新启动继续"
+        else:
+            job.status = "done"
+            failed_folders = sum(item.status == "error" for item in job.items)
+            job.label = (
+                f"批量分类完成：{job.done} 个文件夹，"
+                f"新处理 {job.processed} 个视频，"
+                f"其他文件 {job.other_files} 个，{failed_folders} 个文件夹失败"
+            )
+    except Exception as exc:
+        job.status = "cancelled" if job.cancel_requested else "error"
+        job.error = None if job.cancel_requested else str(exc)
+        job.label = "批量视频分类已中止" if job.cancel_requested else "批量视频分类失败"
+        if not job.cancel_requested:
+            logger.exception("video batch error")
+    finally:
+        job.finished_at = time.time()
+
+
+def _run_material_job() -> None:
+    job = MATERIAL_JOB
+    assert job is not None
+    job.started_at = time.time()
+    try:
+        from pic_selecter import material_organizer
+
+        job.status = "running"
+        job.label = "正在扫描压缩包和重复文件夹..."
+
+        def on_progress(done, total, label, item):
+            job.done = done
+            job.total = total
+            job.label = label
+            if item is None:
+                return
+            job.current = Path(item.source).name
+            job.recent_items.append(asdict(item))
+            if len(job.recent_items) > 80:
+                del job.recent_items[:-80]
+
+        summary = material_organizer.organize_materials(
+            job.folder,
+            progress=on_progress,
+            cancel_check=lambda: job.cancel_requested,
+        )
+        job.done = max(job.done, summary.extracted_archives)
+        job.deleted_duplicate_dirs = summary.deleted_duplicate_dirs
+        job.extracted_archives = summary.extracted_archives
+        job.deleted_archives = summary.deleted_archives
+        job.organized_dirs = summary.organized_dirs
+        job.moved_files = summary.moved_files
+        job.skipped = summary.skipped
+        job.failed = summary.failed
+        job.recent_items = [asdict(item) for item in summary.items[-80:]]
+        job.status = "done"
+        job.label = (
+            f"素材整理完成：解压 {job.extracted_archives} 个，"
+            f"归并 {job.organized_dirs} 个分类文件夹，删除重复 {job.deleted_duplicate_dirs} 个"
+        )
+    except Exception as exc:
+        from pic_selecter import material_organizer
+
+        if isinstance(exc, material_organizer.OrganizerCancelled) or job.cancel_requested:
+            job.status = "cancelled"
+            job.label = "素材整理已中止"
+        else:
+            job.status = "error"
+            job.error = str(exc)
+            job.label = "素材整理失败"
+            logger.exception("material organizer error")
     finally:
         job.finished_at = time.time()
 
@@ -3063,6 +3419,10 @@ def api_start():
             return jsonify({"error": "已有任务在跑，请稍候"}), 409
         if _is_batch_running(BATCH_JOB):
             return jsonify({"error": "批量预跑正在进行，请先等待或中止批量任务"}), 409
+        if _is_video_job_running(VIDEO_JOB) or _is_video_batch_running(VIDEO_BATCH_JOB):
+            return jsonify({"error": "视频分类正在进行，请先等待或中止视频任务"}), 409
+        if _is_material_job_running(MATERIAL_JOB):
+            return jsonify({"error": "素材整理正在进行，请先等待或中止整理任务"}), 409
 
         _apply_runtime_selection(runtime)
         # 一次性运行：始终全新开始，不读旧 state，不复用缓存。
@@ -3199,6 +3559,10 @@ def api_batch_start():
             return jsonify({"error": "当前单文件夹任务正在运行，请稍后再批量预跑"}), 409
         if _is_batch_running(BATCH_JOB):
             return jsonify({"error": "批量预跑已经在运行"}), 409
+        if _is_video_job_running(VIDEO_JOB) or _is_video_batch_running(VIDEO_BATCH_JOB):
+            return jsonify({"error": "视频分类正在进行，请先等待或中止视频任务"}), 409
+        if _is_material_job_running(MATERIAL_JOB):
+            return jsonify({"error": "素材整理正在进行，请先等待或中止整理任务"}), 409
         BATCH_JOB = BatchJobState(
             root=root,
             status="running",
@@ -3240,6 +3604,334 @@ def api_batch_cancel():
     return jsonify({"ok": True})
 
 
+def _video_job_payload() -> dict:
+    if VIDEO_JOB is None:
+        return {"status": "idle", "kind": "single"}
+    job = VIDEO_JOB
+    elapsed = (job.finished_at or time.time()) - (job.started_at or time.time())
+    return {
+        "kind": "single",
+        "status": job.status,
+        "folder": job.folder,
+        "output": job.folder,
+        "mode": job.mode,
+        "done": job.done,
+        "total": job.total,
+        "processed": job.processed,
+        "skipped": job.skipped,
+        "failed": job.failed,
+        "other_files": job.other_files,
+        "current": job.current,
+        "label": job.label,
+        "error": job.error,
+        "elapsed": elapsed,
+        "categories": job.categories,
+        "items": job.recent_items,
+    }
+
+
+def _material_job_payload() -> dict:
+    if MATERIAL_JOB is None:
+        return {"status": "idle", "kind": "material"}
+    job = MATERIAL_JOB
+    elapsed = (job.finished_at or time.time()) - (job.started_at or time.time())
+    return {
+        "kind": "material",
+        "status": job.status,
+        "folder": job.folder,
+        "done": job.done,
+        "total": job.total,
+        "deleted_duplicate_dirs": job.deleted_duplicate_dirs,
+        "extracted_archives": job.extracted_archives,
+        "deleted_archives": job.deleted_archives,
+        "organized_dirs": job.organized_dirs,
+        "moved_files": job.moved_files,
+        "skipped": job.skipped,
+        "failed": job.failed,
+        "current": job.current,
+        "label": job.label,
+        "error": job.error,
+        "elapsed": elapsed,
+        "items": job.recent_items,
+    }
+
+
+def _video_batch_payload() -> dict:
+    if VIDEO_BATCH_JOB is None:
+        return {"status": "idle", "kind": "batch"}
+    job = VIDEO_BATCH_JOB
+    elapsed = (job.finished_at or time.time()) - (job.started_at or time.time())
+    return {
+        "kind": "batch",
+        "status": job.status,
+        "root": job.root,
+        "folder": job.root,
+        "mode": job.mode,
+        "done": job.done,
+        "total": job.total,
+        "processed": job.processed,
+        "skipped": job.skipped,
+        "failed": job.failed,
+        "other_files": job.other_files,
+        "label": job.label,
+        "error": job.error,
+        "elapsed": elapsed,
+        "categories": job.categories,
+        "items": [
+            {
+                **asdict(item),
+                "elapsed": (item.finished_at or time.time()) - item.started_at
+                if item.started_at else 0,
+            }
+            for item in job.items
+        ],
+    }
+
+
+@app.route("/api/video/peek", methods=["POST"])
+def api_video_peek():
+    data = request.get_json(force=True) or {}
+    folder = (data.get("folder") or "").strip()
+    if not folder:
+        return jsonify({"error": "请填写视频文件夹路径"}), 400
+    path = Path(folder).expanduser().resolve()
+    if not path.is_dir():
+        return jsonify({"error": f"目录不存在: {path}"}), 400
+    from pic_selecter import video_classifier
+
+    count = video_classifier.count_videos(path)
+    batch_items = video_classifier.discover_batch_folders(path)
+    return jsonify({
+        "ok": True,
+        "folder": str(path),
+        "count": count,
+        "batch_folders": len(batch_items),
+        "batch_videos": sum(item_count for _, item_count in batch_items),
+    })
+
+
+@app.route("/api/material/peek", methods=["POST"])
+def api_material_peek():
+    data = request.get_json(force=True) or {}
+    folder = (data.get("folder") or "").strip()
+    if not folder:
+        return jsonify({"error": "请填写素材文件夹路径"}), 400
+    path = Path(folder).expanduser().resolve()
+    if not path.is_dir():
+        return jsonify({"error": f"目录不存在: {path}"}), 400
+    from pic_selecter import material_organizer
+
+    return jsonify({"ok": True, "folder": str(path), **material_organizer.peek_materials(path)})
+
+
+@app.route("/api/material/start", methods=["POST"])
+def api_material_start():
+    global MATERIAL_JOB
+    data = request.get_json(force=True) or {}
+    folder = (data.get("folder") or "").strip()
+    if not folder:
+        return jsonify({"error": "请填写素材文件夹路径"}), 400
+    folder = str(Path(folder).expanduser().resolve())
+    if not Path(folder).is_dir():
+        return jsonify({"error": f"目录不存在: {folder}"}), 400
+
+    with LOCK:
+        if _is_job_running(JOB) or _is_batch_running(BATCH_JOB):
+            return jsonify({"error": "照片任务正在运行，请完成或中止后再整理素材"}), 409
+        if _is_video_job_running(VIDEO_JOB) or _is_video_batch_running(VIDEO_BATCH_JOB):
+            return jsonify({"error": "视频任务正在运行，请完成或中止后再整理素材"}), 409
+        if _is_material_job_running(MATERIAL_JOB):
+            return jsonify({"error": "已有素材整理任务正在运行"}), 409
+        MATERIAL_JOB = MaterialJobState(folder=folder, label="准备整理素材...")
+
+    thread = threading.Thread(target=_run_material_job, daemon=True)
+    thread.start()
+    return jsonify({"ok": True, "folder": folder})
+
+
+@app.route("/api/material/status")
+def api_material_status():
+    return jsonify(_material_job_payload())
+
+
+@app.route("/api/material/cancel", methods=["POST"])
+def api_material_cancel():
+    if MATERIAL_JOB is None or not _is_material_job_running(MATERIAL_JOB):
+        return jsonify({"ok": True, "note": "no active material job"})
+    MATERIAL_JOB.cancel_requested = True
+    MATERIAL_JOB.label = "正在中止素材整理..."
+    return jsonify({"ok": True})
+
+
+@app.route("/api/material/open", methods=["POST"])
+def api_material_open():
+    if MATERIAL_JOB is None:
+        return jsonify({"error": "no material job"}), 400
+    target = Path(MATERIAL_JOB.folder)
+    if not target.exists():
+        return jsonify({"error": f"目录不存在: {target}"}), 404
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        elif sys.platform == "win32":
+            os.startfile(str(target))  # type: ignore
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/video/start", methods=["POST"])
+def api_video_start():
+    global VIDEO_JOB
+    data = request.get_json(force=True) or {}
+    folder = (data.get("folder") or "").strip()
+    if not folder:
+        return jsonify({"error": "请填写视频文件夹路径"}), 400
+    folder = str(Path(folder).expanduser().resolve())
+    if not Path(folder).is_dir():
+        return jsonify({"error": f"目录不存在: {folder}"}), 400
+    mode = data.get("mode", "move")
+    if mode not in ("copy", "move"):
+        mode = "move"
+
+    from pic_selecter import video_classifier, vision
+
+    total = video_classifier.count_videos(folder)
+    if total <= 0:
+        return jsonify({"error": "该文件夹中没有找到可处理的视频"}), 400
+    try:
+        vision.require_person_detector_capabilities()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    with LOCK:
+        if _is_job_running(JOB) or _is_batch_running(BATCH_JOB):
+            return jsonify({"error": "照片任务正在进行，请先完成或中止照片任务"}), 409
+        if _is_video_job_running(VIDEO_JOB) or _is_video_batch_running(VIDEO_BATCH_JOB):
+            return jsonify({"error": "已有视频分类任务正在进行"}), 409
+        if _is_material_job_running(MATERIAL_JOB):
+            return jsonify({"error": "素材整理正在运行，请完成或中止后再分类视频"}), 409
+        VIDEO_JOB = VideoJobState(
+            folder=folder,
+            mode=mode,
+            runtime=_normalize_runtime(data.get("runtime")),
+            total=total,
+            label="准备视频分类...",
+        )
+
+    thread = threading.Thread(target=_run_video_job, daemon=True)
+    thread.start()
+    return jsonify({"ok": True, "total": total})
+
+
+@app.route("/api/video/status")
+def api_video_status():
+    return jsonify(_video_job_payload())
+
+
+@app.route("/api/video/cancel", methods=["POST"])
+def api_video_cancel():
+    if VIDEO_JOB is None or not _is_video_job_running(VIDEO_JOB):
+        return jsonify({"ok": True, "note": "no active video job"})
+    VIDEO_JOB.cancel_requested = True
+    VIDEO_JOB.label = "正在中止，当前视频处理完后停止..."
+    return jsonify({"ok": True})
+
+
+@app.route("/api/video/batch/start", methods=["POST"])
+def api_video_batch_start():
+    global VIDEO_BATCH_JOB
+    data = request.get_json(force=True) or {}
+    root = (data.get("folder") or data.get("root") or "").strip()
+    if not root:
+        return jsonify({"error": "请填写总文件夹路径"}), 400
+    root = str(Path(root).expanduser().resolve())
+    if not Path(root).is_dir():
+        return jsonify({"error": f"目录不存在: {root}"}), 400
+    mode = data.get("mode", "move")
+    if mode not in ("copy", "move"):
+        mode = "move"
+
+    from pic_selecter import video_classifier, vision
+
+    discovered = video_classifier.discover_batch_folders(root)
+    if not discovered:
+        return jsonify({"error": "总文件夹下没有找到包含视频的一级子文件夹"}), 400
+    try:
+        vision.require_person_detector_capabilities()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    items = [
+        VideoBatchItemState(folder=str(path), name=path.name, video_count=count)
+        for path, count in discovered
+    ]
+    with LOCK:
+        if _is_job_running(JOB) or _is_batch_running(BATCH_JOB):
+            return jsonify({"error": "照片任务正在进行，请先完成或中止照片任务"}), 409
+        if _is_video_job_running(VIDEO_JOB) or _is_video_batch_running(VIDEO_BATCH_JOB):
+            return jsonify({"error": "已有视频分类任务正在进行"}), 409
+        if _is_material_job_running(MATERIAL_JOB):
+            return jsonify({"error": "素材整理正在运行，请完成或中止后再分类视频"}), 409
+        VIDEO_BATCH_JOB = VideoBatchJobState(
+            root=root,
+            mode=mode,
+            runtime=_normalize_runtime(data.get("runtime")),
+            items=items,
+            total=len(items),
+            label="准备批量视频分类...",
+        )
+
+    thread = threading.Thread(target=_run_video_batch_job, daemon=True)
+    thread.start()
+    return jsonify({
+        "ok": True,
+        "total": len(items),
+        "video_total": sum(item.video_count for item in items),
+    })
+
+
+@app.route("/api/video/batch/status")
+def api_video_batch_status():
+    return jsonify(_video_batch_payload())
+
+
+@app.route("/api/video/batch/cancel", methods=["POST"])
+def api_video_batch_cancel():
+    if VIDEO_BATCH_JOB is None or not _is_video_batch_running(VIDEO_BATCH_JOB):
+        return jsonify({"ok": True, "note": "no active video batch"})
+    VIDEO_BATCH_JOB.cancel_requested = True
+    VIDEO_BATCH_JOB.label = "正在中止，当前视频处理完后停止..."
+    return jsonify({"ok": True})
+
+
+@app.route("/api/video/open", methods=["POST"])
+def api_video_open():
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind", "single")
+    if kind == "batch":
+        if VIDEO_BATCH_JOB is None:
+            return jsonify({"error": "没有批量视频任务"}), 400
+        target = Path(VIDEO_BATCH_JOB.root)
+    else:
+        if VIDEO_JOB is None:
+            return jsonify({"error": "没有视频分类任务"}), 400
+        target = Path(VIDEO_JOB.folder)
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        elif sys.platform == "win32":
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/reset_session", methods=["POST"])
 def api_reset_session():
     """完全重置：中止运行中的任务、清空 SESSION/LAST_INFOS。
@@ -3253,6 +3945,15 @@ def api_reset_session():
         JOB.finished_at = time.time()
         if JOB_LOG is not None:
             JOB_LOG.event("RESET", "用户回主页，任务取消")
+    if VIDEO_JOB is not None and _is_video_job_running(VIDEO_JOB):
+        VIDEO_JOB.cancel_requested = True
+        VIDEO_JOB.label = "用户返回主页，正在停止"
+    if VIDEO_BATCH_JOB is not None and _is_video_batch_running(VIDEO_BATCH_JOB):
+        VIDEO_BATCH_JOB.cancel_requested = True
+        VIDEO_BATCH_JOB.label = "用户返回主页，正在停止"
+    if MATERIAL_JOB is not None and _is_material_job_running(MATERIAL_JOB):
+        MATERIAL_JOB.cancel_requested = True
+        MATERIAL_JOB.label = "用户返回主页，正在停止"
     # 2. 清 SESSION & LAST_INFOS
     with LOCK:
         SESSION = None
@@ -4532,17 +5233,31 @@ def api_capabilities():
         face = bool(has_face_support())
     except Exception:
         face = False
-    return jsonify({"face_aware": face})
+    try:
+        from pic_selecter import vision
+        vision.require_person_detector_capabilities()
+        video_person = True
+    except Exception:
+        video_person = False
+    return jsonify({"face_aware": face, "video_person_detection": video_person})
 
 
 @app.route("/api/browse_folder", methods=["POST"])
 def api_browse_folder():
     """调起系统原生选文件夹对话框（macOS: osascript / Win: tkinter / Linux: zenity）。"""
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind", "photo")
+    if kind == "video":
+        prompt = "选择要处理的视频文件夹"
+    elif kind == "material":
+        prompt = "选择要整理的素材文件夹"
+    else:
+        prompt = "选择要处理的照片文件夹"
     try:
         if sys.platform == "darwin":
             script = (
                 'tell application "System Events" to activate\n'
-                'set chosen to POSIX path of (choose folder with prompt "选择要处理的照片文件夹")\n'
+                f'set chosen to POSIX path of (choose folder with prompt "{prompt}")\n'
                 'return chosen'
             )
             proc = subprocess.run(
@@ -4566,7 +5281,7 @@ def api_browse_folder():
             root = tkinter.Tk()
             root.withdraw()
             root.attributes("-topmost", True)
-            chosen = filedialog.askdirectory(title="选择要处理的照片文件夹")
+            chosen = filedialog.askdirectory(title=prompt)
             root.destroy()
             if not chosen:
                 return jsonify({"ok": True, "cancelled": True})
@@ -4575,7 +5290,7 @@ def api_browse_folder():
             # Linux: 尝试 zenity
             try:
                 proc = subprocess.run(
-                    ["zenity", "--file-selection", "--directory", "--title=选择照片文件夹"],
+                    ["zenity", "--file-selection", "--directory", f"--title={prompt}"],
                     capture_output=True, text=True, timeout=120,
                 )
             except FileNotFoundError:
@@ -4876,9 +5591,9 @@ def api_watermark_start():
     cfg_dict = request.get_json(silent=True) or {}
     cfg = WatermarkConfig.from_dict(cfg_dict)
 
-    # 输出目录：winners/watermarked_YYYYMMDD_HHMMSS
+    # 输出目录：watermarked_YYYYMMDD_HHMMSS
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_dir = winners_dir(SESSION.folder) / f"watermarked_{stamp}"
+    out_dir = Path(SESSION.folder) / f"watermarked_{stamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     WATERMARK_JOB = WatermarkJobState(

@@ -226,7 +226,7 @@ def test_confirm_prescreen_groups_only_passed_and_restored_photos(tmp_path):
     assert app.SESSION.prescreen_reviewed is True
 
 
-def test_skip_duplicate_with_prescreen_archives_passed_and_restored_as_winners(tmp_path):
+def test_skip_duplicate_with_prescreen_keeps_passed_and_restored_in_place(tmp_path):
     app = import_app_module()
     drop = make_info(tmp_path / "drop.jpg", score=8, auto_reject=True, reason="严重模糊")
     restore = make_info(tmp_path / "restore.jpg", score=9, auto_reject=True, reason="曝光过低", face_count=1)
@@ -259,8 +259,9 @@ def test_skip_duplicate_with_prescreen_archives_passed_and_restored_as_winners(t
     assert app.SESSION.skip_duplicate_selection is True
     assert app.SESSION.prescreen_reviewed is True
     assert all(group.finished for group in app.SESSION.groups)
-    assert (tmp_path / "winners" / "风景" / "good.jpg").exists()
-    assert (tmp_path / "winners" / "人像" / "restore.jpg").exists()
+    assert (tmp_path / "day1" / "good.jpg").exists()
+    assert (tmp_path / "restore.jpg").exists()
+    assert not (tmp_path / "winners").exists()
     assert (tmp_path / "losers" / "模糊" / "drop.jpg").exists()
 
 
@@ -285,11 +286,12 @@ def test_skip_duplicate_without_prescreen_keeps_all_readable_photos(tmp_path):
     assert sess.skip_duplicate_selection is True
     assert len(sess.groups) == 2
     assert all(group.finished and group.winner for group in sess.groups)
-    assert (tmp_path / "winners" / "风景" / "one.jpg").exists()
-    assert (tmp_path / "winners" / "合照" / "two.jpg").exists()
+    assert (tmp_path / "one.jpg").exists()
+    assert (tmp_path / "nested" / "two.jpg").exists()
+    assert not (tmp_path / "winners").exists()
 
 
-def test_refine_winners_reuses_archived_winners_and_sends_rejects_to_duplicate_losers(tmp_path, monkeypatch):
+def test_refine_winners_reuses_kept_photos_and_sends_rejects_to_duplicate_losers(tmp_path, monkeypatch):
     app = import_app_module()
     one = make_info(tmp_path / "one.jpg", score=80, face_count=0)
     two = make_info(tmp_path / "two.jpg", score=82, face_count=0)
@@ -306,10 +308,10 @@ def test_refine_winners_reuses_archived_winners_and_sends_rejects_to_duplicate_l
         prescreen_strength="standard",
         engine="fast",
     )
-    archived_one = tmp_path / "winners" / "风景" / "one.jpg"
-    archived_two = tmp_path / "winners" / "风景" / "two.jpg"
-    assert archived_one.exists()
-    assert archived_two.exists()
+    kept_one = tmp_path / "one.jpg"
+    kept_two = tmp_path / "two.jpg"
+    assert kept_one.exists()
+    assert kept_two.exists()
 
     monkeypatch.setattr(app, "group_infos", lambda infos, **kwargs: [infos])
 
@@ -321,8 +323,8 @@ def test_refine_winners_reuses_archived_winners_and_sends_rejects_to_duplicate_l
     assert app.SESSION.prescreen_enabled is False
     group = app.SESSION.groups[0]
     assert group.finished is False
-    assert group.left == str(archived_one)
-    assert group.right == str(archived_two)
+    assert group.left == str(kept_one)
+    assert group.right == str(kept_two)
 
     chosen = client.post(
         "/api/choose",
@@ -331,8 +333,8 @@ def test_refine_winners_reuses_archived_winners_and_sends_rejects_to_duplicate_l
     ).get_json()
 
     assert chosen["done"] is True
-    assert archived_one.exists()
-    assert not archived_two.exists()
+    assert kept_one.exists()
+    assert not kept_two.exists()
     assert (tmp_path / "losers" / "重复落选" / "two.jpg").exists()
 
 

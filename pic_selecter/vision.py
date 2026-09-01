@@ -315,7 +315,13 @@ def _cleanup_download_temps(dest: Path) -> None:
                 logger.debug("vision: 跳过被占用的临时下载文件 %s: %s", path, e)
 
 
-def _download_file(url: str, dest: Path, *, verify: bool = True) -> None:
+def _download_file(
+    url: str,
+    dest: Path,
+    *,
+    verify: bool = True,
+    progress: Callable[[int, int], None] | None = None,
+) -> None:
     import requests
     try:
         import certifi
@@ -329,10 +335,16 @@ def _download_file(url: str, dest: Path, *, verify: bool = True) -> None:
     try:
         with requests.get(url, stream=True, timeout=(10, 120), verify=verify_arg) as resp:
             resp.raise_for_status()
+            headers = getattr(resp, "headers", {}) or {}
+            total = int(headers.get("content-length") or 0)
+            done = 0
             with tmp.open("wb") as f:
                 for chunk in resp.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
+                        done += len(chunk)
+                        if progress:
+                            progress(done, total)
         tmp.replace(dest)
     finally:
         try:
@@ -707,6 +719,140 @@ def extract_clipiqa_score(pil_img: Image.Image) -> float:
         score = model(img)
     val = float(score.item() if hasattr(score, "item") else score)
     return max(0.0, min(1.0, val))
+
+
+# =============================================================
+# 视频人物检测：Torchvision SSDLite MobileNetV3（COCO person）
+# =============================================================
+
+def require_person_detector_capabilities() -> None:
+    """视频有人/无人分类需要的最小依赖。"""
+    try:
+        import torch  # noqa: F401
+        import torchvision  # noqa: F401
+        from torchvision.models.detection import (  # noqa: F401
+            SSDLite320_MobileNet_V3_Large_Weights,
+            ssdlite320_mobilenet_v3_large,
+        )
+    except ImportError as e:
+        raise VisionUnavailable(
+            f"视频人物检测缺少 torch / torchvision：{e}。请按 requirements.txt 安装。"
+        ) from e
+
+
+def _person_detector_device():
+    import torch
+
+    runtime = _runtime_preference()
+    if runtime == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if runtime == "gpu":
+        raise VisionUnavailable("视频人物检测强制使用 GPU，但当前没有可用 CUDA 显卡。")
+    # Torchvision detection 的 NMS 在不同 MPS 版本上兼容性不稳定；该 3.4M
+    # 参数模型在 CPU 上也足够轻，Apple Silicon 固定走 CPU 更稳。
+    return torch.device("cpu")
+
+
+def _person_detector_checkpoint(progress=None) -> Path:
+    _ensure_model_storage_configured()
+    require_person_detector_capabilities()
+    from torchvision.models.detection import SSDLite320_MobileNet_V3_Large_Weights
+
+    weights = SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
+    filename = Path(weights.url).name
+    checkpoint = _torch_home() / "hub" / "checkpoints" / filename
+    if checkpoint.is_file() and checkpoint.stat().st_size > 1024 * 1024:
+        return checkpoint
+
+    with _DOWNLOAD_LOCK:
+        if checkpoint.is_file() and checkpoint.stat().st_size > 1024 * 1024:
+            return checkpoint
+        if progress:
+            progress(0, 0, "首次准备人体检测模型（约 14 MB）...")
+
+        def _download_progress(done: int, total: int) -> None:
+            if not progress:
+                return
+            if total > 0:
+                percent = min(100, int(done / total * 100))
+                progress(done, total, f"下载人体检测模型 {percent}%")
+            else:
+                progress(done, total, f"下载人体检测模型 {done / 1024 / 1024:.1f} MB")
+
+        try:
+            _download_file(weights.url, checkpoint, verify=True, progress=_download_progress)
+        except Exception as e:
+            raise VisionUnavailable(
+                "视频人体检测模型下载失败。请使用包含模型的离线包，"
+                f"或检查网络后重试。最近错误：{type(e).__name__}: {e}"
+            ) from e
+    return checkpoint
+
+
+def _ensure_person_detector(progress=None):
+    _person_detector_checkpoint(progress=progress)
+    if "person_detector" in _models:
+        return _models["person_detector"]
+    with _LOCK:
+        if "person_detector" in _models:
+            return _models["person_detector"]
+        import torch
+        from torchvision.models.detection import (
+            SSDLite320_MobileNet_V3_Large_Weights,
+            ssdlite320_mobilenet_v3_large,
+        )
+
+        weights = SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
+        device = _person_detector_device()
+        if progress:
+            progress(0, 0, "加载本地人体检测模型...")
+        try:
+            model = ssdlite320_mobilenet_v3_large(weights=weights, progress=False)
+            model.eval().to(device)
+        except Exception as e:
+            raise VisionUnavailable(
+                f"视频人体检测模型加载失败：{type(e).__name__}: {e}"
+            ) from e
+        categories = list(weights.meta.get("categories") or [])
+        try:
+            person_label = categories.index("person")
+        except ValueError as e:
+            raise VisionUnavailable("人体检测模型缺少 COCO person 类别。") from e
+        _models["person_detector"] = (model, weights, device, person_label)
+        logger.info("vision: 视频人体检测模型就绪（SSDLite MobileNetV3，%s）", device)
+    return _models["person_detector"]
+
+
+def prewarm_person_detector(progress=None) -> None:
+    _ensure_person_detector(progress=progress)
+    if progress:
+        progress(1, 1, "人体检测模型已就绪")
+
+
+def detect_people_scores(pil_images: list[Image.Image] | tuple[Image.Image, ...]) -> list[float]:
+    """返回每帧最高的 person 置信度，未检出为 0。"""
+    if not pil_images:
+        return []
+    import torch
+
+    model, weights, device, person_label = _ensure_person_detector()
+    transform = weights.transforms()
+    tensors = [transform(image.convert("RGB")).to(device) for image in pil_images]
+    try:
+        with torch.inference_mode():
+            outputs = model(tensors)
+    except Exception as e:
+        raise VisionUnavailable(f"视频人物检测失败：{type(e).__name__}: {e}") from e
+
+    frame_scores: list[float] = []
+    for output in outputs:
+        labels = output["labels"].detach().cpu()
+        scores = output["scores"].detach().cpu()
+        matches = scores[labels == person_label]
+        frame_scores.append(float(matches.max().item()) if len(matches) else 0.0)
+    return frame_scores
 
 
 # =============================================================
