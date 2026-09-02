@@ -2649,6 +2649,8 @@ body:has(#view-done.active) .status-badge {
 .video-result-status { text-align: right; }
 .video-result-row.is-error .video-result-category,
 .video-result-row.is-error .video-result-status { color: var(--accent-deep); }
+.video-result-row.is-skipped .video-result-category,
+.video-result-row.is-skipped .video-result-status { color: var(--ink-muted); }
 .video-result-row.is-batch {
   grid-template-columns: minmax(0, 1fr) 130px 210px 86px;
 }

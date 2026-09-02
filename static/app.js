@@ -1432,7 +1432,7 @@ function renderMaterialItems(items) {
   }
   recent.forEach((item) => {
     const row = document.createElement("div");
-    row.className = `video-result-row ${item.status === "error" ? "is-error" : ""}`;
+    row.className = `video-result-row ${item.status === "error" ? "is-error" : item.status === "skipped" ? "is-skipped" : ""}`;
     const name = document.createElement("div");
     name.className = "video-result-name";
     name.textContent = basename(item.source);
@@ -1443,6 +1443,7 @@ function renderMaterialItems(items) {
       extract: "解压",
       organize_dir: "归并",
       delete_duplicate_dir: "删除重复",
+      skipped: "跳过",
     };
     action.textContent = labels[item.action] || item.action || "";
     const note = document.createElement("div");
@@ -1450,7 +1451,7 @@ function renderMaterialItems(items) {
     note.textContent = item.note || "";
     const status = document.createElement("div");
     status.className = "video-result-status";
-    status.textContent = item.status === "error" ? "失败" : "完成";
+    status.textContent = item.status === "error" ? "失败" : item.status === "skipped" ? "已跳过" : "完成";
     row.append(name, action, note, status);
     list.appendChild(row);
   });

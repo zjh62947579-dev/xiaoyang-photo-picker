@@ -179,6 +179,14 @@ def _safe_extract_zip(archive: Path, destination: Path) -> None:
             zf.extract(info, destination)
 
 
+def _is_valid_zip(archive: Path) -> bool:
+    """快速检查 ZIP 结构，避免坏压缩包中断整理流程。"""
+    try:
+        return zipfile.is_zipfile(archive)
+    except (OSError, ValueError):
+        return False
+
+
 def _discover_archives(root: Path) -> list[Path]:
     archives: list[Path] = []
     for current, dirs, files in os.walk(root):
@@ -321,6 +329,14 @@ def organize_materials(
         extract_root = archive.parent
         item = OrganizerItem(source=str(archive), action="extract")
         try:
+            if not _is_valid_zip(archive):
+                summary.skipped += 1
+                item.status = "skipped"
+                item.note = "不是有效的 ZIP 压缩包，已跳过（原文件未删除）"
+                summary.items.append(item)
+                if progress:
+                    progress(index, total, f"跳过无效压缩包 {archive.name}", item)
+                continue
             target = extract_root
             if parsed:
                 route, category = parsed

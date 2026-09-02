@@ -95,3 +95,24 @@ def test_organize_flattens_already_nested_route_category_status_dirs(tmp_path, m
     assert summary.moved_files == 1
     assert (tmp_path / "7.18惠州冲浪" / "风景" / "a.jpg").read_bytes() == b"a"
     assert not (tmp_path / "7.18惠州冲浪" / "风景" / "7.18惠州冲浪").exists()
+
+
+def test_organize_skips_invalid_zip_and_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr(material_organizer, "move_to_trash", _direct_delete)
+    invalid = tmp_path / "损坏压缩包.zip"
+    invalid.write_bytes(b"not a zip archive")
+    _zip_file(
+        tmp_path / "无水印_测试路线_风景(已显示).zip",
+        {"photo.jpg": b"photo"},
+    )
+
+    summary = material_organizer.organize_materials(tmp_path)
+
+    assert summary.extracted_archives == 1
+    assert summary.skipped == 1
+    assert summary.failed == 0
+    assert invalid.exists()
+    skipped = next(item for item in summary.items if item.status == "skipped")
+    assert skipped.source == str(invalid)
+    assert "已跳过" in skipped.note
+    assert (tmp_path / "测试路线" / "风景" / "photo.jpg").exists()

@@ -2990,7 +2990,8 @@ def _run_material_job() -> None:
         job.status = "done"
         job.label = (
             f"素材整理完成：解压 {job.extracted_archives} 个，"
-            f"归并 {job.organized_dirs} 个分类文件夹，删除重复 {job.deleted_duplicate_dirs} 个"
+            f"归并 {job.organized_dirs} 个分类文件夹，删除重复 {job.deleted_duplicate_dirs} 个，"
+            f"跳过无效压缩包 {job.skipped} 个"
         )
     except Exception as exc:
         from pic_selecter import material_organizer
